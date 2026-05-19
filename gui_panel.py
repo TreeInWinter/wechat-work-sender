@@ -17,10 +17,22 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import json
 import os
+import subprocess
 import threading
+from AppKit import NSWorkspace
+from ApplicationServices import (
+    AXUIElementCreateApplication,
+    AXUIElementCopyAttributeValue,
+    AXValueGetValue,
+    kAXWindowsAttribute,
+    kAXPositionAttribute,
+    kAXSizeAttribute,
+    kAXValueCGPointType,
+    kAXValueCGSizeType,
+)
 
 # 导入发送模块
-from sender import send_message, is_daxiang_running
+from sender import send_message, is_daxiang_running, NoChatWindowError
 
 # ============================================================
 # 话术数据管理
@@ -50,6 +62,34 @@ DEFAULT_PHRASES = {
 }
 
 
+_wechat_ax = None  # 缓存 AXUIElement，避免每次重新查 PID
+
+
+def get_wechat_window_bounds() -> tuple | None:
+    """通过 Accessibility API 直接读取企业微信窗口坐标，无 subprocess 开销"""
+    global _wechat_ax
+    try:
+        if _wechat_ax is None:
+            apps = NSWorkspace.sharedWorkspace().runningApplications()
+            pid = next((a.processIdentifier() for a in apps if a.localizedName() == "企业微信"), None)
+            if pid is None:
+                return None
+            _wechat_ax = AXUIElementCreateApplication(pid)
+
+        _, windows = AXUIElementCopyAttributeValue(_wechat_ax, kAXWindowsAttribute, None)
+        if not windows:
+            return None
+        win = windows[0]
+        _, pos_ref  = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
+        _, size_ref = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
+        _, pt = AXValueGetValue(pos_ref,  kAXValueCGPointType, None)
+        _, sz = AXValueGetValue(size_ref, kAXValueCGSizeType,  None)
+        return (int(pt.x), int(pt.y), int(sz.width), int(sz.height))
+    except Exception:
+        _wechat_ax = None  # 进程重启后重新获取
+        return None
+
+
 def load_phrases() -> dict:
     """加载话术库"""
     if os.path.exists(DATA_FILE):
@@ -75,14 +115,24 @@ class DaxiangSenderApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("企业微信快捷发送 - Demo")
-        self.root.geometry("420x600")
-        self.root.attributes("-topmost", True)  # 窗口置顶
+        self.root.attributes("-topmost", True)
+        self.root.resizable(False, False)   # 尺寸由同步逻辑控制，禁止手动拖拽
         self.root.configure(bg="#f5f5f5")
 
         self.phrases = load_phrases()
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
 
+        # 启动时同步读取企业微信窗口位置，直接以正确尺寸显示
+        bounds = get_wechat_window_bounds()
+        if bounds:
+            wx, wy, ww, wh = bounds
+            self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
+        else:
+            self.root.geometry("420x600")
+        self._last_bounds = bounds
+
         self._build_ui()
+        self.root.after(100, self._poll_snap)  # 启动轮询跟随
 
     def _build_ui(self):
         """构建界面"""
@@ -256,6 +306,15 @@ class DaxiangSenderApp:
         """切换分组"""
         self._refresh_list()
 
+    def _poll_snap(self):
+        """每 100ms 直接在主线程读取窗口坐标（AX API 调用 <5ms，无需后台线程）"""
+        bounds = get_wechat_window_bounds()
+        if bounds and bounds != self._last_bounds:
+            self._last_bounds = bounds
+            wx, wy, ww, wh = bounds
+            self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
+        self.root.after(100, self._poll_snap)
+
     def _check_status(self):
         """检查企业微信状态"""
         def check():
@@ -304,19 +363,23 @@ class DaxiangSenderApp:
     def _do_send(self, text: str):
         """执行发送（在后台线程中）"""
         def send_task():
-            success = send_message(text)
-            if success:
+            try:
+                send_message(text)
                 self.root.after(0, lambda: self.status_label.config(
                     text="✅ 发送成功", fg="#2ecc71"
                 ))
-            else:
+            except NoChatWindowError as e:
+                msg = str(e)  # Python3 会在 except 块结束后删除 e，提前取值
+                self.root.after(0, lambda: messagebox.showwarning("提示", msg))
+                self.root.after(0, lambda: self.status_label.config(
+                    text="⚠️ 未选中聊天窗口", fg="#e67e22"
+                ))
+            except Exception:
                 self.root.after(0, lambda: self.status_label.config(
                     text="❌ 发送失败", fg="#e74c3c"
                 ))
-            # 3秒后恢复状态
             self.root.after(3000, self._check_status)
 
-        # 直接在后台线程执行发送，窗口保持不动
         threading.Thread(target=send_task, daemon=True).start()
 
     def _add_phrase(self):
