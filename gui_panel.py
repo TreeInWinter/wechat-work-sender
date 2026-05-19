@@ -32,7 +32,7 @@ from ApplicationServices import (
 )
 
 # 导入发送模块
-from sender import send_message, is_daxiang_running, NoChatWindowError
+from sender import send_message, is_daxiang_running, NoChatWindowError, read_chat_messages
 
 # ============================================================
 # 话术数据管理
@@ -278,6 +278,19 @@ class DaxiangSenderApp:
         )
         custom_send_btn.pack(fill=tk.X)
 
+        # 读取聊天内容按钮
+        read_btn = tk.Button(
+            input_frame,
+            text="📋 读取聊天内容",
+            command=self._read_chat,
+            bg="#8e44ad",
+            fg="#2d0047",
+            activebackground="#a569bd",
+            font=("PingFang SC", 11),
+            relief=tk.GROOVE,
+        )
+        read_btn.pack(fill=tk.X, pady=(6, 0))
+
         # 底部提示
         tip_label = tk.Label(
             self.root,
@@ -381,6 +394,71 @@ class DaxiangSenderApp:
             self.root.after(3000, self._check_status)
 
         threading.Thread(target=send_task, daemon=True).start()
+
+    def _read_chat(self):
+        """读取企业微信当前聊天内容并弹窗展示"""
+        self.status_label.config(text="⏳ 读取中...", fg="white")
+
+        def fetch():
+            msgs = read_chat_messages(max_messages=30)
+            self.root.after(0, lambda: self._show_chat_popup(msgs))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _show_chat_popup(self, msgs: list):
+        """弹窗展示聊天内容"""
+        self._check_status()
+
+        win = tk.Toplevel(self.root)
+        win.title("聊天内容")
+        win.geometry("500x460")
+        win.attributes("-topmost", True)
+        win.configure(bg="#f5f5f5")
+
+        # 标题栏
+        header = tk.Frame(win, bg="#2c3e50", height=36)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        tk.Label(
+            header,
+            text=f"共 {len(msgs)} 条消息",
+            fg="white", bg="#2c3e50",
+            font=("PingFang SC", 11),
+        ).pack(side=tk.LEFT, padx=10, pady=8)
+        tk.Button(
+            header, text="✕", command=win.destroy,
+            bg="#2c3e50", fg="white", borderwidth=0, font=("", 13),
+        ).pack(side=tk.RIGHT, padx=8)
+
+        # 消息文本区（带滚动条）
+        frame = tk.Frame(win, bg="#f5f5f5")
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+
+        scrollbar = ttk.Scrollbar(frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        text_widget = tk.Text(
+            frame,
+            font=("PingFang SC", 11),
+            bg="white", fg="#2c3e50",
+            wrap=tk.WORD,
+            borderwidth=1, relief=tk.SOLID,
+            yscrollcommand=scrollbar.set,
+            state=tk.NORMAL,
+            padx=8, pady=6,
+        )
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        scrollbar.config(command=text_widget.yview)
+
+        if not msgs:
+            text_widget.insert(tk.END, "未读取到消息，请先在企业微信中选中聊天窗口。")
+        else:
+            for m in msgs:
+                time_str = f"[{m['time']}]  " if m['time'] else ""
+                text_widget.insert(tk.END, f"{time_str}{m['content']}\n\n")
+
+        text_widget.config(state=tk.DISABLED)
+        text_widget.see(tk.END)  # 滚动到最新消息
 
     def _add_phrase(self):
         """添加新话术"""
