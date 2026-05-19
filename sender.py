@@ -32,6 +32,7 @@ from ApplicationServices import (
     kAXChildrenAttribute,
     kAXFocusedAttribute,
     kAXWindowsAttribute,
+    kAXValueAttribute,
 )
 from Quartz import (
     CGEventCreateKeyboardEvent,
@@ -127,6 +128,82 @@ def focus_chat_input() -> bool:
         return True
     except Exception:
         return False
+
+
+def _find_msg_table(root):
+    """BFS 找右侧消息历史的 AXTable（depth=6，路径含两层 AXSplitGroup）"""
+    queue = deque([(root, 0)])
+    while queue:
+        el, d = queue.popleft()
+        if d > 8:
+            continue
+        try:
+            role = get_ax_attr(el, kAXRoleAttribute)
+            if role == "AXTable" and d == 6:
+                return el
+            children = get_ax_attr(el, kAXChildrenAttribute) or []
+            for c in children:
+                queue.append((c, d + 1))
+        except Exception:
+            pass
+    return None
+
+
+def get_ax_attr(element, attribute):
+    _, value = AXUIElementCopyAttributeValue(element, attribute, None)
+    return value
+
+
+def read_chat_messages(max_messages: int = 20) -> list[dict]:
+    """
+    读取当前聊天窗口的消息记录。
+
+    返回列表，每项为：
+        {"content": str, "time": str | None}
+    按时间顺序排列，最多返回 max_messages 条。
+    """
+    ax = _get_ax_app()
+    if ax is None:
+        return []
+    try:
+        windows = get_ax_attr(ax, kAXWindowsAttribute)
+        if not windows:
+            return []
+        table = _find_msg_table(windows[0])
+        if table is None:
+            return []
+
+        messages = []
+        rows = get_ax_attr(table, kAXChildrenAttribute) or []
+        for row in rows:
+            cells = get_ax_attr(row, kAXChildrenAttribute) or []
+            if not cells:
+                continue
+            content, time_str = _extract_msg_fields(cells[0])
+            if content:
+                messages.append({"content": content, "time": time_str})
+
+        return messages[-max_messages:]
+    except Exception:
+        return []
+
+
+def _extract_msg_fields(cell) -> tuple[str | None, str | None]:
+    """从消息 Cell 中提取内容和时间"""
+    content = None
+    time_str = None
+    children = get_ax_attr(cell, kAXChildrenAttribute) or []
+    for child in children:
+        role = get_ax_attr(child, kAXRoleAttribute)
+        val  = get_ax_attr(child, kAXValueAttribute)
+        if role == "AXTextArea" and val and content is None:
+            raw = str(val)
+            # 部分消息 AX 树会将内容重复两次，去重
+            half = len(raw) // 2
+            content = raw[:half] if half and raw[:half] == raw[half:] else raw
+        elif role == "AXStaticText" and val:
+            time_str = str(val)
+    return content, time_str
 
 
 # ============================================================
