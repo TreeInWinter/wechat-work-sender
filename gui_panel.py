@@ -19,6 +19,17 @@ import json
 import os
 import subprocess
 import threading
+from AppKit import NSWorkspace
+from ApplicationServices import (
+    AXUIElementCreateApplication,
+    AXUIElementCopyAttributeValue,
+    AXValueGetValue,
+    kAXWindowsAttribute,
+    kAXPositionAttribute,
+    kAXSizeAttribute,
+    kAXValueCGPointType,
+    kAXValueCGSizeType,
+)
 
 # 导入发送模块
 from sender import send_message, is_daxiang_running
@@ -51,25 +62,31 @@ DEFAULT_PHRASES = {
 }
 
 
+_wechat_ax = None  # 缓存 AXUIElement，避免每次重新查 PID
+
+
 def get_wechat_window_bounds() -> tuple | None:
-    """获取企业微信窗口的 (x, y, width, height)，失败返回 None"""
-    script = '''
-    tell application "System Events"
-        tell process "企业微信"
-            set theWindow to first window
-            set p to position of theWindow
-            set s to size of theWindow
-            return {item 1 of p, item 2 of p, item 1 of s, item 2 of s}
-        end tell
-    end tell
-    '''
-    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-    if result.returncode != 0:
-        return None
+    """通过 Accessibility API 直接读取企业微信窗口坐标，无 subprocess 开销"""
+    global _wechat_ax
     try:
-        parts = [int(v.strip()) for v in result.stdout.strip().split(",")]
-        return tuple(parts)  # (x, y, width, height)
-    except (ValueError, IndexError):
+        if _wechat_ax is None:
+            apps = NSWorkspace.sharedWorkspace().runningApplications()
+            pid = next((a.processIdentifier() for a in apps if a.localizedName() == "企业微信"), None)
+            if pid is None:
+                return None
+            _wechat_ax = AXUIElementCreateApplication(pid)
+
+        _, windows = AXUIElementCopyAttributeValue(_wechat_ax, kAXWindowsAttribute, None)
+        if not windows:
+            return None
+        win = windows[0]
+        _, pos_ref  = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
+        _, size_ref = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
+        _, pt = AXValueGetValue(pos_ref,  kAXValueCGPointType, None)
+        _, sz = AXValueGetValue(size_ref, kAXValueCGSizeType,  None)
+        return (int(pt.x), int(pt.y), int(sz.width), int(sz.height))
+    except Exception:
+        _wechat_ax = None  # 进程重启后重新获取
         return None
 
 
@@ -105,10 +122,10 @@ class DaxiangSenderApp:
         self.phrases = load_phrases()
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
 
-        self._last_bounds = None   # 上次记录的企业微信窗口位置，避免无效更新
+        self._last_bounds = None  # 缓存上次坐标，避免重复 geometry 调用
 
         self._build_ui()
-        self.root.after(200, self._poll_snap)   # 启动轮询跟随
+        self.root.after(100, self._poll_snap)  # 启动轮询跟随
 
     def _build_ui(self):
         """构建界面"""
@@ -282,21 +299,14 @@ class DaxiangSenderApp:
         """切换分组"""
         self._refresh_list()
 
-    def _apply_snap(self, bounds: tuple):
-        """在主线程中更新窗口位置（仅坐标变化时调用）"""
-        wx, wy, ww, wh = bounds
-        self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
-
     def _poll_snap(self):
-        """每 200ms 在后台线程查询企业微信位置，坐标变化时才更新面板"""
-        def fetch():
-            bounds = get_wechat_window_bounds()
-            if bounds and bounds != self._last_bounds:
-                self._last_bounds = bounds
-                self.root.after(0, lambda: self._apply_snap(bounds))
-
-        threading.Thread(target=fetch, daemon=True).start()
-        self.root.after(200, self._poll_snap)
+        """每 100ms 直接在主线程读取窗口坐标（AX API 调用 <5ms，无需后台线程）"""
+        bounds = get_wechat_window_bounds()
+        if bounds and bounds != self._last_bounds:
+            self._last_bounds = bounds
+            wx, wy, ww, wh = bounds
+            self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
+        self.root.after(100, self._poll_snap)
 
     def _check_status(self):
         """检查企业微信状态"""
