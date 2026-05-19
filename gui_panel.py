@@ -115,14 +115,20 @@ class DaxiangSenderApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("企业微信快捷发送 - Demo")
-        self.root.geometry("420x600")
-        self.root.attributes("-topmost", True)  # 窗口置顶
+        self.root.attributes("-topmost", True)
         self.root.configure(bg="#f5f5f5")
 
         self.phrases = load_phrases()
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
 
-        self._last_bounds = None  # 缓存上次坐标，避免重复 geometry 调用
+        # 启动时同步读取企业微信窗口位置，直接以正确尺寸显示
+        bounds = get_wechat_window_bounds()
+        if bounds:
+            wx, wy, ww, wh = bounds
+            self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
+        else:
+            self.root.geometry("420x600")
+        self._last_bounds = bounds
 
         self._build_ui()
         self.root.after(100, self._poll_snap)  # 启动轮询跟随
