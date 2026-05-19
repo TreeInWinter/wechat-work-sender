@@ -32,7 +32,7 @@ from ApplicationServices import (
 )
 
 # 导入发送模块
-from sender import send_message, is_daxiang_running
+from sender import send_message, is_daxiang_running, NoChatWindowError
 
 # ============================================================
 # 话术数据管理
@@ -363,19 +363,22 @@ class DaxiangSenderApp:
     def _do_send(self, text: str):
         """执行发送（在后台线程中）"""
         def send_task():
-            success = send_message(text)
-            if success:
+            try:
+                send_message(text)
                 self.root.after(0, lambda: self.status_label.config(
                     text="✅ 发送成功", fg="#2ecc71"
                 ))
-            else:
+            except NoChatWindowError as e:
+                self.root.after(0, lambda: messagebox.showwarning("提示", str(e)))
+                self.root.after(0, lambda: self.status_label.config(
+                    text="⚠️ 未选中聊天窗口", fg="#e67e22"
+                ))
+            except Exception:
                 self.root.after(0, lambda: self.status_label.config(
                     text="❌ 发送失败", fg="#e74c3c"
                 ))
-            # 3秒后恢复状态
             self.root.after(3000, self._check_status)
 
-        # 直接在后台线程执行发送，窗口保持不动
         threading.Thread(target=send_task, daemon=True).start()
 
     def _add_phrase(self):

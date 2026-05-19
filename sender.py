@@ -22,6 +22,12 @@ from AppKit import (
     NSPasteboard, NSStringPboardType, NSPasteboardTypeString,
     NSWorkspace, NSApplicationActivateIgnoringOtherApps,
 )
+from ApplicationServices import (
+    AXUIElementCreateApplication,
+    AXUIElementCopyAttributeValue,
+    kAXFocusedUIElementAttribute,
+    kAXRoleAttribute,
+)
 from Quartz import (
     CGEventCreateKeyboardEvent,
     CGEventSetFlags,
@@ -31,6 +37,11 @@ from Quartz import (
     kCGEventKeyDown,
     kCGEventKeyUp,
 )
+
+
+class NoChatWindowError(Exception):
+    """企业微信未选中聊天窗口时抛出"""
+    pass
 
 
 # ============================================================
@@ -60,6 +71,34 @@ def activate_daxiang() -> bool:
     app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
     time.sleep(0.1)  # 等待窗口完成激活
     return True
+
+
+_ax_app_cache = None  # 缓存 AXUIElement，避免重复查 PID
+
+
+def _get_ax_app():
+    global _ax_app_cache
+    if _ax_app_cache is None:
+        app = _get_wechat_app()
+        if app is None:
+            return None
+        _ax_app_cache = AXUIElementCreateApplication(app.processIdentifier())
+    return _ax_app_cache
+
+
+def is_chat_input_ready() -> bool:
+    """检查企业微信当前是否有聊天输入框处于激活状态"""
+    ax = _get_ax_app()
+    if ax is None:
+        return False
+    try:
+        _, focused = AXUIElementCopyAttributeValue(ax, kAXFocusedUIElementAttribute, None)
+        if focused is None:
+            return False
+        _, role = AXUIElementCopyAttributeValue(focused, kAXRoleAttribute, None)
+        return role in ("AXTextArea", "AXTextField")
+    except Exception:
+        return False
 
 
 # ============================================================
@@ -157,7 +196,11 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
         if not activate_daxiang():
             return False
 
-    # Step 2: 保存原始剪贴板内容
+    # Step 2: 检查是否有聊天输入框就绪
+    if not is_chat_input_ready():
+        raise NoChatWindowError("请先在企业微信中选中聊天窗口")
+
+    # Step 3: 保存原始剪贴板内容
     original_clipboard = get_clipboard()
 
     # Step 3: 写入消息到剪贴板并粘贴
