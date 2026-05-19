@@ -173,8 +173,10 @@ class DaxiangSenderApp:
             text="📤 发送选中",
             command=self._send_selected,
             bg="#27ae60",
-            fg="white",
+            fg="#003300",
+            activebackground="#2ecc71",
             font=("PingFang SC", 11, "bold"),
+            relief=tk.GROOVE,
             width=12,
         )
         send_btn.pack(side=tk.LEFT, padx=(0, 5))
@@ -219,8 +221,10 @@ class DaxiangSenderApp:
             text="发送自定义消息",
             command=self._send_custom,
             bg="#3498db",
-            fg="white",
+            fg="#00154f",
+            activebackground="#5dade2",
             font=("PingFang SC", 11),
+            relief=tk.GROOVE,
         )
         custom_send_btn.pack(fill=tk.X)
 
