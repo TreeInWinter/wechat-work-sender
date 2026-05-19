@@ -105,9 +105,10 @@ class DaxiangSenderApp:
         self.phrases = load_phrases()
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
 
+        self._last_bounds = None   # 上次记录的企业微信窗口位置，避免无效更新
+
         self._build_ui()
-        self.root.after(200, self._snap_to_wechat)   # 启动后立即吸附
-        self.root.after(1000, self._poll_snap)        # 启动轮询跟随
+        self.root.after(200, self._poll_snap)   # 启动轮询跟随
 
     def _build_ui(self):
         """构建界面"""
@@ -281,18 +282,21 @@ class DaxiangSenderApp:
         """切换分组"""
         self._refresh_list()
 
-    def _snap_to_wechat(self):
-        """将面板贴到企业微信窗口右侧边缘"""
-        bounds = get_wechat_window_bounds()
-        if bounds:
-            wx, wy, ww, wh = bounds
-            panel_w = 420
-            self.root.geometry(f"{panel_w}x{wh}+{wx + ww}+{wy}")
+    def _apply_snap(self, bounds: tuple):
+        """在主线程中更新窗口位置（仅坐标变化时调用）"""
+        wx, wy, ww, wh = bounds
+        self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
 
     def _poll_snap(self):
-        """每秒重新吸附一次，跟随企业微信移动"""
-        self._snap_to_wechat()
-        self.root.after(1000, self._poll_snap)
+        """每 200ms 在后台线程查询企业微信位置，坐标变化时才更新面板"""
+        def fetch():
+            bounds = get_wechat_window_bounds()
+            if bounds and bounds != self._last_bounds:
+                self._last_bounds = bounds
+                self.root.after(0, lambda: self._apply_snap(bounds))
+
+        threading.Thread(target=fetch, daemon=True).start()
+        self.root.after(200, self._poll_snap)
 
     def _check_status(self):
         """检查企业微信状态"""
