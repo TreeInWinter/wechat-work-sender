@@ -145,8 +145,13 @@ def paste():
 
 
 def press_enter():
-    """模拟按下 Enter 键"""
-    press_key(KEY_RETURN)
+    """用 AppleScript 发送 Return 键，对 Electron 类应用（如企业微信）更可靠"""
+    script = '''
+    tell application "System Events"
+        keystroke return
+    end tell
+    '''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
 def select_all():
