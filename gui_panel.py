@@ -116,6 +116,7 @@ class DaxiangSenderApp:
         self.root = tk.Tk()
         self.root.title("企业微信快捷发送 - Demo")
         self.root.attributes("-topmost", True)
+        self.root.resizable(False, False)   # 尺寸由同步逻辑控制，禁止手动拖拽
         self.root.configure(bg="#f5f5f5")
 
         self.phrases = load_phrases()
