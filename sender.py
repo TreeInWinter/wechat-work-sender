@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-大象自动发送 Demo (macOS)
+向企业微信发送消息 Demo (macOS)
 
 原理：
-1. AppleScript 激活大象窗口
+1. AppleScript 激活企业微信窗口
 2. NSPasteboard 写入要发送的文本到系统剪贴板
 3. CGEvent 模拟 Cmd+V 粘贴
 4. CGEvent 模拟 Enter 发送
 
 使用前提：
-- 大象桌面端已打开且已进入某个聊天窗口
+- 企业微信桌面端已打开且已进入某个聊天窗口
 - 终端/Python 已在「系统设置 → 隐私与安全性 → 辅助功能」中获得授权
 """
 
@@ -34,15 +34,15 @@ from Quartz import (
 # 模块一：窗口识别与激活
 # ============================================================
 
-DAXIANG_APP_NAME = "大象"
+DAXIANG_APP_NAME = "企业微信"
 
 
 def is_daxiang_running() -> bool:
-    """检查大象是否正在运行"""
+    """检查企业微信是否正在运行"""
     script = f'''
     tell application "System Events"
         set appList to name of every process
-        return appList contains "大象"
+        return appList contains "企业微信"
     end tell
     '''
     result = subprocess.run(
@@ -54,11 +54,11 @@ def is_daxiang_running() -> bool:
 
 def activate_daxiang() -> bool:
     """
-    激活大象窗口并将焦点放到最前面的聊天输入框。
+    激活企业微信窗口并将焦点放到最前面的聊天输入框。
     返回是否成功激活。
     """
     script = '''
-    tell application "大象"
+    tell application "企业微信"
         activate
     end tell
     delay 0.3
@@ -68,7 +68,7 @@ def activate_daxiang() -> bool:
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        print(f"[错误] 激活大象失败: {result.stderr}")
+        print(f"[错误] 激活企业微信失败: {result.stderr}")
         return False
     # 给窗口一点时间完成激活
     time.sleep(0.3)
@@ -145,8 +145,13 @@ def paste():
 
 
 def press_enter():
-    """模拟按下 Enter 键"""
-    press_key(KEY_RETURN)
+    """用 AppleScript 发送 Return 键，对 Electron 类应用（如企业微信）更可靠"""
+    script = '''
+    tell application "System Events"
+        keystroke return
+    end tell
+    '''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
 def select_all():
@@ -160,11 +165,11 @@ def select_all():
 
 def send_message(text: str, auto_activate: bool = True, delay_before_send: float = 0.5) -> bool:
     """
-    向大象当前聊天窗口发送一条文本消息。
+    向企业微信当前聊天窗口发送一条文本消息。
 
     参数：
         text: 要发送的消息文本
-        auto_activate: 是否自动激活大象窗口（如果已经是前台则不需要）
+        auto_activate: 是否自动激活企业微信窗口（如果已经是前台则不需要）
         delay_before_send: 粘贴后等待多久再按回车（秒），防止粘贴未完成就发送
 
     返回：
@@ -174,20 +179,20 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
         print("[警告] 消息内容为空，跳过发送")
         return False
 
-    # Step 1: 检查大象是否运行
+    # Step 1: 检查企业微信是否运行
     if not is_daxiang_running():
-        print("[错误] 大象未运行，请先打开大象并进入聊天窗口")
+        print("[错误] 企业微信未运行，请先打开企业微信并进入聊天窗口")
         return False
 
-    # Step 2: 激活大象
+    # Step 2: 激活企业微信
     if auto_activate:
         if not activate_daxiang():
             return False
 
-    # 确认当前前台是大象
+    # 确认当前前台是企业微信
     frontmost = get_frontmost_app()
-    if "大象" not in frontmost:
-        print(f"[警告] 当前前台应用是 '{frontmost}'，不是大象，尝试继续...")
+    if "企业微信" not in frontmost:
+        print(f"[警告] 当前前台应用是 '{frontmost}'，不是企业微信，尝试继续...")
 
     # Step 3: 保存原始剪贴板内容
     original_clipboard = get_clipboard()
