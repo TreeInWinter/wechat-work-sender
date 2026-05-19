@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import json
 import os
+import subprocess
 import threading
 
 # 导入发送模块
@@ -48,6 +49,28 @@ DEFAULT_PHRASES = {
         "感谢咨询，再见！",
     ],
 }
+
+
+def get_wechat_window_bounds() -> tuple | None:
+    """获取企业微信窗口的 (x, y, width, height)，失败返回 None"""
+    script = '''
+    tell application "System Events"
+        tell process "企业微信"
+            set theWindow to first window
+            set p to position of theWindow
+            set s to size of theWindow
+            return {item 1 of p, item 2 of p, item 1 of s, item 2 of s}
+        end tell
+    end tell
+    '''
+    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    try:
+        parts = [int(v.strip()) for v in result.stdout.strip().split(",")]
+        return tuple(parts)  # (x, y, width, height)
+    except (ValueError, IndexError):
+        return None
 
 
 def load_phrases() -> dict:
@@ -83,6 +106,8 @@ class DaxiangSenderApp:
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
 
         self._build_ui()
+        self.root.after(200, self._snap_to_wechat)   # 启动后立即吸附
+        self.root.after(1000, self._poll_snap)        # 启动轮询跟随
 
     def _build_ui(self):
         """构建界面"""
@@ -255,6 +280,19 @@ class DaxiangSenderApp:
     def _on_group_change(self, event=None):
         """切换分组"""
         self._refresh_list()
+
+    def _snap_to_wechat(self):
+        """将面板贴到企业微信窗口右侧边缘"""
+        bounds = get_wechat_window_bounds()
+        if bounds:
+            wx, wy, ww, wh = bounds
+            panel_w = 420
+            self.root.geometry(f"{panel_w}x{wh}+{wx + ww}+{wy}")
+
+    def _poll_snap(self):
+        """每秒重新吸附一次，跟随企业微信移动"""
+        self._snap_to_wechat()
+        self.root.after(1000, self._poll_snap)
 
     def _check_status(self):
         """检查企业微信状态"""
