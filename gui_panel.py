@@ -369,7 +369,8 @@ class DaxiangSenderApp:
                     text="✅ 发送成功", fg="#2ecc71"
                 ))
             except NoChatWindowError as e:
-                self.root.after(0, lambda: messagebox.showwarning("提示", str(e)))
+                msg = str(e)  # Python3 会在 except 块结束后删除 e，提前取值
+                self.root.after(0, lambda: messagebox.showwarning("提示", msg))
                 self.root.after(0, lambda: self.status_label.config(
                     text="⚠️ 未选中聊天窗口", fg="#e67e22"
                 ))

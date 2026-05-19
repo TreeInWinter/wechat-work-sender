@@ -25,8 +25,12 @@ from AppKit import (
 from ApplicationServices import (
     AXUIElementCreateApplication,
     AXUIElementCopyAttributeValue,
+    AXUIElementSetAttributeValue,
     kAXFocusedUIElementAttribute,
     kAXRoleAttribute,
+    kAXChildrenAttribute,
+    kAXFocusedAttribute,
+    kAXWindowsAttribute,
 )
 from Quartz import (
     CGEventCreateKeyboardEvent,
@@ -86,17 +90,40 @@ def _get_ax_app():
     return _ax_app_cache
 
 
-def is_chat_input_ready() -> bool:
-    """检查企业微信当前是否有聊天输入框处于激活状态"""
+def _find_text_area(element, depth=0):
+    """DFS 查找 AXTextArea，最大深度 10"""
+    if depth > 10:
+        return None
+    try:
+        _, role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute, None)
+        if role == "AXTextArea":
+            return element
+        _, children = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, None)
+        if not children:
+            return None
+        for child in children:
+            result = _find_text_area(child, depth + 1)
+            if result is not None:
+                return result
+    except Exception:
+        pass
+    return None
+
+
+def focus_chat_input() -> bool:
+    """在 AX 树中找到聊天输入框并主动聚焦。找到返回 True，否则返回 False。"""
     ax = _get_ax_app()
     if ax is None:
         return False
     try:
-        _, focused = AXUIElementCopyAttributeValue(ax, kAXFocusedUIElementAttribute, None)
-        if focused is None:
+        _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+        if not windows:
             return False
-        _, role = AXUIElementCopyAttributeValue(focused, kAXRoleAttribute, None)
-        return role in ("AXTextArea", "AXTextField")
+        text_area = _find_text_area(windows[0])
+        if text_area is None:
+            return False
+        AXUIElementSetAttributeValue(text_area, kAXFocusedAttribute, True)
+        return True
     except Exception:
         return False
 
@@ -196,8 +223,8 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
         if not activate_daxiang():
             return False
 
-    # Step 2: 检查是否有聊天输入框就绪
-    if not is_chat_input_ready():
+    # Step 2: 找到聊天输入框并聚焦（同时验证是否有聊天窗口）
+    if not focus_chat_input():
         raise NoChatWindowError("请先在企业微信中选中聊天窗口")
 
     # Step 3: 保存原始剪贴板内容
