@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-大象话术快捷发送面板 (macOS GUI Demo)
+企业微信话术快捷发送面板 (macOS GUI Demo)
 
 功能：
-- 话术列表面板，点击即发送到大象
+- 话术列表面板，点击即发送到企业微信
 - 支持自定义话术、分组管理
 - 支持自定义输入发送
 - 窗口置顶，方便随时使用
@@ -74,7 +74,7 @@ def save_phrases(phrases: dict):
 class DaxiangSenderApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("大象快捷发送 - Demo")
+        self.root.title("企业微信快捷发送 - Demo")
         self.root.geometry("420x600")
         self.root.attributes("-topmost", True)  # 窗口置顶
         self.root.configure(bg="#f5f5f5")
@@ -227,7 +227,7 @@ class DaxiangSenderApp:
         # 底部提示
         tip_label = tk.Label(
             self.root,
-            text="💡 双击话术即可发送 | 请确保大象聊天窗口已打开",
+            text="💡 双击话术即可发送 | 请确保企业微信聊天窗口已打开",
             bg="#f5f5f5",
             fg="#7f8c8d",
             font=("PingFang SC", 9),
@@ -253,7 +253,7 @@ class DaxiangSenderApp:
         self._refresh_list()
 
     def _check_status(self):
-        """检查大象状态"""
+        """检查企业微信状态"""
         def check():
             running = is_daxiang_running()
             self.root.after(0, lambda: self._update_status(running))
@@ -263,9 +263,9 @@ class DaxiangSenderApp:
     def _update_status(self, running: bool):
         """更新状态显示"""
         if running:
-            self.status_label.config(text="✅ 大象已运行", fg="#2ecc71")
+            self.status_label.config(text="✅ 企业微信已运行", fg="#2ecc71")
         else:
-            self.status_label.config(text="❌ 大象未运行", fg="#e74c3c")
+            self.status_label.config(text="❌ 企业微信未运行", fg="#e74c3c")
 
     def _send_selected(self):
         """发送选中的话术"""
@@ -363,7 +363,7 @@ class DaxiangSenderApp:
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  大象快捷发送面板 (macOS Demo)")
+    print("  企业微信快捷发送面板 (macOS Demo)")
     print("  请确保已授予辅助功能权限")
     print("=" * 50)
     app = DaxiangSenderApp()
