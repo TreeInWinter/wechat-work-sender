@@ -16,6 +16,7 @@
 import sys
 import time
 import subprocess
+from collections import deque
 
 # macOS 原生框架
 from AppKit import (
@@ -90,23 +91,23 @@ def _get_ax_app():
     return _ax_app_cache
 
 
-def _find_text_area(element, depth=0):
-    """DFS 查找 AXTextArea，最大深度 10"""
-    if depth > 10:
-        return None
-    try:
-        _, role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute, None)
-        if role == "AXTextArea":
-            return element
-        _, children = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, None)
-        if not children:
-            return None
-        for child in children:
-            result = _find_text_area(child, depth + 1)
-            if result is not None:
-                return result
-    except Exception:
-        pass
+def _find_text_area(root):
+    """BFS 查找最浅的 AXTextArea（聊天输入框比消息历史区更浅，BFS 优先命中）"""
+    queue = deque([(root, 0)])
+    while queue:
+        element, depth = queue.popleft()
+        if depth > 10:
+            continue
+        try:
+            _, role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute, None)
+            if role == "AXTextArea":
+                return element
+            _, children = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, None)
+            if children:
+                for child in children:
+                    queue.append((child, depth + 1))
+        except Exception:
+            pass
     return None
 
 
