@@ -18,7 +18,10 @@ import time
 import subprocess
 
 # macOS 原生框架
-from AppKit import NSPasteboard, NSStringPboardType, NSPasteboardTypeString
+from AppKit import (
+    NSPasteboard, NSStringPboardType, NSPasteboardTypeString,
+    NSWorkspace, NSApplicationActivateIgnoringOtherApps,
+)
 from Quartz import (
     CGEventCreateKeyboardEvent,
     CGEventSetFlags,
@@ -37,56 +40,26 @@ from Quartz import (
 DAXIANG_APP_NAME = "企业微信"
 
 
+def _get_wechat_app():
+    """从 NSWorkspace 找到企业微信的 NSRunningApplication 对象"""
+    apps = NSWorkspace.sharedWorkspace().runningApplications()
+    return next((a for a in apps if a.localizedName() == DAXIANG_APP_NAME), None)
+
+
 def is_daxiang_running() -> bool:
     """检查企业微信是否正在运行"""
-    script = f'''
-    tell application "System Events"
-        set appList to name of every process
-        return appList contains "企业微信"
-    end tell
-    '''
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True, text=True
-    )
-    return "true" in result.stdout.lower()
+    return _get_wechat_app() is not None
 
 
 def activate_daxiang() -> bool:
-    """
-    激活企业微信窗口并将焦点放到最前面的聊天输入框。
-    返回是否成功激活。
-    """
-    script = '''
-    tell application "企业微信"
-        activate
-    end tell
-    delay 0.3
-    '''
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"[错误] 激活企业微信失败: {result.stderr}")
+    """激活企业微信窗口，用 PyObjC 直接调用，无 subprocess 开销"""
+    app = _get_wechat_app()
+    if app is None:
+        print("[错误] 企业微信未运行")
         return False
-    # 给窗口一点时间完成激活
-    time.sleep(0.3)
+    app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+    time.sleep(0.1)  # 等待窗口完成激活
     return True
-
-
-def get_frontmost_app() -> str:
-    """获取当前最前台应用名称"""
-    script = '''
-    tell application "System Events"
-        return name of first application process whose frontmost is true
-    end tell
-    '''
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True, text=True
-    )
-    return result.stdout.strip()
 
 
 # ============================================================
@@ -163,7 +136,7 @@ def select_all():
 # 模块四：核心发送逻辑
 # ============================================================
 
-def send_message(text: str, auto_activate: bool = True, delay_before_send: float = 0.5) -> bool:
+def send_message(text: str, auto_activate: bool = True, delay_before_send: float = 0.1) -> bool:
     """
     向企业微信当前聊天窗口发送一条文本消息。
 
@@ -179,42 +152,24 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
         print("[警告] 消息内容为空，跳过发送")
         return False
 
-    # Step 1: 检查企业微信是否运行
-    if not is_daxiang_running():
-        print("[错误] 企业微信未运行，请先打开企业微信并进入聊天窗口")
-        return False
-
-    # Step 2: 激活企业微信
+    # Step 1: 激活企业微信（内含运行检查）
     if auto_activate:
         if not activate_daxiang():
             return False
 
-    # 确认当前前台是企业微信
-    frontmost = get_frontmost_app()
-    if "企业微信" not in frontmost:
-        print(f"[警告] 当前前台应用是 '{frontmost}'，不是企业微信，尝试继续...")
-
-    # Step 3: 保存原始剪贴板内容
+    # Step 2: 保存原始剪贴板内容
     original_clipboard = get_clipboard()
 
-    # Step 4: 写入消息到剪贴板
+    # Step 3: 写入消息到剪贴板并粘贴
     set_clipboard(text)
-    time.sleep(0.1)
-
-    # Step 5: 模拟 Cmd+V 粘贴
     paste()
     time.sleep(delay_before_send)
 
-    # Step 6: 再等一下确保粘贴内容渲染完成
-    time.sleep(0.3)
-
-    # Step 7: 模拟 Enter 发送
+    # Step 4: 模拟 Enter 发送
     press_enter()
-    time.sleep(0.2)
 
-    # Step 7: 恢复原始剪贴板（可选，防止覆盖用户剪贴板）
+    # Step 5: 恢复原始剪贴板
     if original_clipboard:
-        time.sleep(0.3)
         set_clipboard(original_clipboard)
 
     print(f"[成功] 消息已发送: {text[:50]}{'...' if len(text) > 50 else ''}")
