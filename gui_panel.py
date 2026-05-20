@@ -57,7 +57,10 @@ else:
 APP_SUPPORT = os.path.expanduser(
     "~/Library/Application Support/企业微信快捷发送"
 )
-os.makedirs(APP_SUPPORT, exist_ok=True)
+try:
+    os.makedirs(APP_SUPPORT, exist_ok=True)
+except Exception:
+    APP_SUPPORT = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(APP_SUPPORT, "phrases.json")
 
 # 默认话术库
@@ -115,7 +118,10 @@ def ensure_data_file():
         return
     bundled = os.path.join(BUNDLE_DIR, "phrases_default.json")
     if os.path.exists(bundled):
-        shutil.copy(bundled, DATA_FILE)
+        try:
+            shutil.copy(bundled, DATA_FILE)
+        except Exception:
+            save_phrases(DEFAULT_PHRASES)
     else:
         save_phrases(DEFAULT_PHRASES)
 
