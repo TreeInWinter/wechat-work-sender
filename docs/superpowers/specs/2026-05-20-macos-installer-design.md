@@ -19,15 +19,18 @@
 ### 打包工具：PyInstaller + hdiutil
 
 - **PyInstaller**：将 Python 应用和所有依赖打包成独立 `.app` bundle，arm64 原生支持
+- **pyinstaller-hooks-contrib**：PyInstaller 官方 hook 库，包含 pyobjc 的自动处理规则，**必须安装**
 - **hdiutil**：macOS 系统自带，无需额外安装，将 `.app` 打包成 `.dmg`
 
 ### 打包目标
 
 ```
 dist/
-├── 企业微信快捷发送.app      ← PyInstaller 输出
-└── 企业微信快捷发送.dmg      ← hdiutil 输出（最终分发物）
+├── 企业微信快捷发送.app   ← PyInstaller 输出
+└── wechat-sender.dmg      ← hdiutil 输出（文件名 ASCII，避免路径问题）
 ```
+
+> DMG 卷标（挂载后显示的名字）仍用中文「企业微信快捷发送」，文件名用 ASCII。
 
 ---
 
@@ -37,10 +40,10 @@ dist/
 
 `.app` 内部只读，`phrases.json` 必须迁移到用户可写目录。
 
-**修改位置：** `gui_panel.py` 和 `sender.py`（如有引用）
+**修改位置：** `gui_panel.py`（`sender.py` 中 `DATA_FILE` 不存在，无需改）
 
 ```python
-# 旧代码（只读 bundle 内）
+# 旧代码（只读 bundle 内，打包后写入报 Permission denied）
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(SCRIPT_DIR, "phrases.json")
 
@@ -52,23 +55,36 @@ os.makedirs(APP_SUPPORT, exist_ok=True)
 DATA_FILE = os.path.join(APP_SUPPORT, "phrases.json")
 ```
 
-### 2. 首次启动时复制默认话术
+### 2. bundle_dir 检测（规范写法）
 
 ```python
-DEFAULT_PHRASES_BUNDLED = os.path.join(
-    getattr(sys, "_MEIPASS", os.path.dirname(__file__)),
-    "phrases_default.json"
-)
+import sys
+
+# PyInstaller 运行时 sys.frozen = True，sys._MEIPASS 是解压目录
+# 普通运行时回退到脚本目录
+if getattr(sys, 'frozen', False):
+    BUNDLE_DIR = sys._MEIPASS
+else:
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+```
+
+### 3. 首次启动时复制默认话术
+
+```python
+import shutil
+
+DEFAULT_PHRASES_BUNDLED = os.path.join(BUNDLE_DIR, "phrases_default.json")
 
 def ensure_data_file():
+    """首次启动时将 bundle 内的默认话术复制到用户数据目录"""
     if not os.path.exists(DATA_FILE):
         if os.path.exists(DEFAULT_PHRASES_BUNDLED):
             shutil.copy(DEFAULT_PHRASES_BUNDLED, DATA_FILE)
         else:
-            save_phrases(DEFAULT_PHRASES)
+            save_phrases(DEFAULT_PHRASES)  # 回退到代码内硬编码的默认值
 ```
 
-`sys._MEIPASS` 是 PyInstaller 运行时解压目录，普通运行时该属性不存在，回退到脚本目录。
+在 `DaxiangSenderApp.__init__` 最前面调用 `ensure_data_file()`。
 
 ---
 
@@ -77,65 +93,131 @@ def ensure_data_file():
 ### build.spec（PyInstaller 配置文件）
 
 ```python
+from PyInstaller.utils.hooks import collect_data_files, collect_all
+import sys
+
+# ── 收集 customtkinter 所有资源（主题图片、JSON 配置等）
+ctk_datas, ctk_binaries, ctk_hidden = collect_all('customtkinter')
+
+# ── 收集 tkinter / Tcl-Tk 动态库（漏掉会导致窗口无法打开）
+tk_datas, tk_binaries, tk_hidden = collect_all('tkinter')
+
+block_cipher = None
+
 a = Analysis(
     ['gui_panel.py'],
-    datas=[('phrases.json', '.')],           # 内置默认话术模板
+    pathex=[],
+    binaries=ctk_binaries + tk_binaries,
+    datas=[
+        ('phrases_default.json', '.'),  # 内置默认话术模板
+    ] + ctk_datas + tk_datas,
     hiddenimports=[
+        # pyobjc（pyinstaller-hooks-contrib 会自动处理大部分，此处补充常见漏项）
         'AppKit', 'Foundation', 'Quartz',
         'ApplicationServices',
         'objc', '_objc',
-        'customtkinter',
-        'tkinter', 'tkinter.ttk',
+        'AppKit._AppKit',
+        'Foundation._Foundation',
+        'Quartz._Quartz',
+        'ApplicationServices._ApplicationServices',
+        # tkinter
         '_tkinter',
-    ],
-    ...
+        'tkinter', 'tkinter.ttk', 'tkinter.messagebox', 'tkinter.simpledialog',
+    ] + ctk_hidden + tk_hidden,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='企业微信快捷发送',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,         # 不显示终端窗口
+    disable_windowed_traceback=False,
+    target_arch='arm64',   # Apple Silicon
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='企业微信快捷发送',
 )
 
 app = BUNDLE(
-    exe,
+    coll,
     name='企业微信快捷发送.app',
-    icon='assets/icon.icns',                 # 可选，无则用默认图标
+    icon=None,             # 无 icon.icns 时用系统默认
     bundle_identifier='com.internal.wechat-sender',
     info_plist={
         'NSAccessibilityUsageDescription':
             '本应用需要辅助功能权限以自动化企业微信发送消息',
         'NSHighResolutionCapable': True,
         'LSMinimumSystemVersion': '10.15',
+        'CFBundleDisplayName': '企业微信快捷发送',
+        'CFBundleShortVersionString': '1.0.0',
     },
 )
 ```
 
-### DMG 创建脚本（build.sh）
+### build.sh（一键打包脚本）
 
 ```bash
 #!/bin/bash
 set -e
 
 APP_NAME="企业微信快捷发送"
+DMG_FILENAME="wechat-sender"          # ASCII 文件名，避免路径问题
 DIST_DIR="dist"
+VENV=".venv/bin"
 
-# 1. 清理旧构建
-rm -rf "$DIST_DIR"
+echo "==> 安装打包依赖..."
+"$VENV/pip" install pyinstaller pyinstaller-hooks-contrib
 
-# 2. PyInstaller 打包
-pyinstaller build.spec
+echo "==> 清理旧构建..."
+rm -rf "$DIST_DIR" build __pycache__
 
-# 3. 创建临时 DMG 目录
-mkdir -p dmg_staging
-cp -r "$DIST_DIR/${APP_NAME}.app" dmg_staging/
-ln -s /Applications dmg_staging/Applications  # 快捷方式
+echo "==> PyInstaller 打包..."
+"$VENV/pyinstaller" build.spec
 
-# 4. hdiutil 生成 DMG
+echo "==> 创建 DMG..."
+STAGING="dmg_staging"
+rm -rf "$STAGING"
+mkdir -p "$STAGING"
+cp -r "$DIST_DIR/${APP_NAME}.app" "$STAGING/"
+ln -s /Applications "$STAGING/Applications"
+
 hdiutil create \
     -volname "$APP_NAME" \
-    -srcfolder dmg_staging \
+    -srcfolder "$STAGING" \
     -ov -format UDZO \
-    "$DIST_DIR/${APP_NAME}.dmg"
+    "$DIST_DIR/${DMG_FILENAME}.dmg"
 
-# 5. 清理临时目录
-rm -rf dmg_staging
+rm -rf "$STAGING"
 
-echo "✅ 打包完成：$DIST_DIR/${APP_NAME}.dmg"
+echo ""
+echo "✅ 打包完成：$DIST_DIR/${DMG_FILENAME}.dmg"
+echo "   大小：$(du -sh "$DIST_DIR/${DMG_FILENAME}.dmg" | cut -f1)"
 ```
 
 ---
@@ -144,11 +226,10 @@ echo "✅ 打包完成：$DIST_DIR/${APP_NAME}.dmg"
 
 | 文件 | 说明 |
 |------|------|
-| `build.spec` | PyInstaller 配置，声明 hiddenimports、Info.plist、数据文件 |
+| `build.spec` | PyInstaller 配置，包含资源收集和 Info.plist |
 | `build.sh` | 一键打包脚本，输出 `.dmg` |
-| `phrases_default.json` | bundle 内置的默认话术模板（首次启动时复制） |
-| `assets/icon.icns` | 应用图标（可选，无则跳过） |
-| `docs/install-guide.md` | 用户安装说明（Gatekeeper 处理 + 辅助功能授权） |
+| `phrases_default.json` | bundle 内置的默认话术模板（内容与 `phrases.json` 相同）|
+| `docs/install-guide.md` | 用户安装说明（含 macOS 14+ Gatekeeper 处理步骤）|
 
 ---
 
@@ -157,36 +238,42 @@ echo "✅ 打包完成：$DIST_DIR/${APP_NAME}.dmg"
 | 文件 | 变更 | 原因 |
 |------|------|------|
 | `gui_panel.py` | `DATA_FILE` 路径改为 `~/Library/Application Support/` | bundle 内只读 |
-| `gui_panel.py` | 启动时调用 `ensure_data_file()` | 首次启动复制默认话术 |
+| `gui_panel.py` | 新增 `BUNDLE_DIR` 检测和 `ensure_data_file()` | 首次启动初始化数据 |
+| `gui_panel.py` | `__init__` 最前面调用 `ensure_data_file()` | 保证数据目录存在 |
 
 ---
 
-## 安装流程（用户视角）
+## 安装流程（macOS 14+ 用户视角）
 
-1. 下载 `企业微信快捷发送.dmg`
-2. 打开 DMG，将 `.app` 拖入 Applications
-3. 首次打开时 macOS 提示"未知来源"→ **右键 → 打开 → 打开**
+1. 下载 `wechat-sender.dmg`
+2. 双击打开 DMG，将「企业微信快捷发送.app」拖入 Applications
+3. 首次打开时 macOS 弹出警告 → **不要点"移到废纸篓"**  
+   → 打开「系统设置 → 隐私与安全性 → 安全性」  
+   → 找到「已阻止使用'企业微信快捷发送'」→ 点「仍然打开」
 4. 在「系统设置 → 隐私与安全性 → 辅助功能」添加 `企业微信快捷发送.app`
 5. 重新打开应用，正常使用
 
-> **注意**：步骤 3-4 只需做一次。后续直接双击启动。
+> 步骤 3-4 只需做一次。后续直接双击启动。
 
 ---
 
-## 验证方式
+## 验证方式（冒烟测试）
 
-1. `build.sh` 执行无报错
-2. 生成的 `.app` 可双击启动
-3. 首次启动自动创建 `~/Library/Application Support/企业微信快捷发送/phrases.json`
-4. 添加/删除话术后数据持久化到 `~/Library/...`
-5. 发送消息正常（需先授予辅助功能权限）
-6. 读取聊天内容正常
-7. 关闭并重启 app，话术数据保留
+| 测试项 | 预期结果 |
+|--------|---------|
+| `build.sh` 执行 | 无报错，输出 `dist/wechat-sender.dmg` |
+| 挂载 DMG | 卷标显示「企业微信快捷发送」，含 .app 和 Applications 快捷方式 |
+| 首次启动 | `~/Library/Application Support/企业微信快捷发送/phrases.json` 自动创建 |
+| 添加话术 | 重启后数据保留（写入 `~/Library/...` 非 bundle 内）|
+| 发送消息 | 授权辅助功能后发送成功 |
+| 读取聊天 | 弹窗正常显示消息 |
+| 升级安装 | 旧 `phrases.json` 不被覆盖 |
 
 ---
 
 ## 已知限制
 
-- **无代码签名**：分发时需告知用户 Gatekeeper 处理步骤
-- **辅助功能需重授权**：首次安装后需在系统设置中重新授权
-- **不支持 Intel Mac**：仅针对 Apple Silicon (arm64) 构建
+- **无代码签名**：无 Apple Developer 账号，macOS 14+ 需按安装说明处理 Gatekeeper
+- **辅助功能需重授权**：从终端改为 .app 运行，系统视为新应用，需重新授权
+- **仅 arm64**：不支持 Intel Mac
+- **pyobjc hidden imports 需验证**：打包后需实际运行冒烟测试，按日志补充漏项
