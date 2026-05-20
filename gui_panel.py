@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 """
-企业微信话术快捷发送面板 (macOS GUI Demo)
+企业微信话术快捷发送面板 (macOS GUI)
 
-功能：
-- 话术列表面板，点击即发送到企业微信
-- 支持自定义话术、分组管理
-- 支持自定义输入发送
-- 窗口置顶，方便随时使用
-
-依赖：
-- tkinter (Python 内置)
+依赖:
+- customtkinter
 - sender.py (同目录)
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
 import json
 import os
 import subprocess
 import threading
+
+import customtkinter as ctk
+from tkinter import messagebox, simpledialog
 from AppKit import NSWorkspace
 from ApplicationServices import (
     AXUIElementCreateApplication,
@@ -31,8 +26,19 @@ from ApplicationServices import (
     kAXValueCGSizeType,
 )
 
-# 导入发送模块
 from sender import send_message, is_daxiang_running, NoChatWindowError, read_chat_messages
+
+# 颜色常量
+PRIMARY   = "#1677FF"
+PRIMARY_H = "#0958d9"   # hover
+CARD_BG   = "#e6f0ff"   # 选中卡片背景
+PANEL_BG  = "#f0f5ff"   # 面板背景
+DOT_OK    = "#52c41a"
+DOT_ERR   = "#ff4d4f"
+DOT_WAIT  = "#faad14"
+
+ctk.set_appearance_mode("system")   # 跟随 macOS 深色/浅色
+ctk.set_default_color_theme("blue")
 
 # ============================================================
 # 话术数据管理
@@ -113,16 +119,15 @@ def save_phrases(phrases: dict):
 
 class DaxiangSenderApp:
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("企业微信快捷发送 - Demo")
+        self.root = ctk.CTk()
+        self.root.title("企业微信快捷发送")
         self.root.attributes("-topmost", True)
-        self.root.resizable(False, False)   # 尺寸由同步逻辑控制，禁止手动拖拽
-        self.root.configure(bg="#f5f5f5")
+        self.root.resizable(False, False)
 
         self.phrases = load_phrases()
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
+        self._selected_card = None  # 当前选中的卡片
 
-        # 启动时同步读取企业微信窗口位置，直接以正确尺寸显示
         bounds = get_wechat_window_bounds()
         if bounds:
             wx, wy, ww, wh = bounds
@@ -132,7 +137,7 @@ class DaxiangSenderApp:
         self._last_bounds = bounds
 
         self._build_ui()
-        self.root.after(100, self._poll_snap)  # 启动轮询跟随
+        self.root.after(100, self._poll_snap)
 
     def _build_ui(self):
         """构建界面"""
@@ -498,7 +503,6 @@ class DaxiangSenderApp:
                 self._refresh_list()
 
     def run(self):
-        """启动应用"""
         self.root.mainloop()
 
 
