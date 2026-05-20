@@ -371,9 +371,12 @@ class DaxiangSenderApp:
     #   - 警告/确认 → 弹出前临时关闭 topmost，结束后恢复
 
     def _ask_input(self, title: str, prompt: str) -> str | None:
-        """弹出文本输入框，使用 CTkInputDialog 避免被 topmost 遮挡"""
+        """弹出文本输入框，临时关闭 topmost 确保对话框可见且可输入"""
+        self.root.attributes("-topmost", False)
         dialog = ctk.CTkInputDialog(text=prompt, title=title)
-        return dialog.get_input()
+        result = dialog.get_input()
+        self.root.attributes("-topmost", True)
+        return result
 
     def _show_warning(self, message: str):
         """弹出警告框，临时关闭 topmost 确保可见"""
