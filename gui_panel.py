@@ -9,7 +9,9 @@
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import threading
 
 import customtkinter as ctk
@@ -44,8 +46,19 @@ ctk.set_default_color_theme("blue")
 # 话术数据管理
 # ============================================================
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(SCRIPT_DIR, "phrases.json")
+# PyInstaller 运行时 sys.frozen=True，sys._MEIPASS 是解压目录
+# 普通 python 运行时回退到脚本目录
+if getattr(sys, 'frozen', False):
+    BUNDLE_DIR = sys._MEIPASS
+else:
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 用户数据目录（可读写，app 升级后数据不丢失）
+APP_SUPPORT = os.path.expanduser(
+    "~/Library/Application Support/企业微信快捷发送"
+)
+os.makedirs(APP_SUPPORT, exist_ok=True)
+DATA_FILE = os.path.join(APP_SUPPORT, "phrases.json")
 
 # 默认话术库
 DEFAULT_PHRASES = {
@@ -94,6 +107,17 @@ def get_wechat_window_bounds() -> tuple | None:
     except Exception:
         _wechat_ax = None  # 进程重启后重新获取
         return None
+
+
+def ensure_data_file():
+    """首次启动时将 bundle 内的默认话术复制到用户数据目录"""
+    if os.path.exists(DATA_FILE):
+        return
+    bundled = os.path.join(BUNDLE_DIR, "phrases_default.json")
+    if os.path.exists(bundled):
+        shutil.copy(bundled, DATA_FILE)
+    else:
+        save_phrases(DEFAULT_PHRASES)
 
 
 def load_phrases() -> dict:
@@ -180,6 +204,7 @@ class PhraseCard(ctk.CTkFrame):
 
 class DaxiangSenderApp:
     def __init__(self):
+        ensure_data_file()   # 必须在任何 UI 初始化之前
         self.root = ctk.CTk()
         self.root.title("企业微信快捷发送")
         self.root.attributes("-topmost", True)
