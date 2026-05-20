@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 """
-企业微信话术快捷发送面板 (macOS GUI Demo)
+企业微信话术快捷发送面板 (macOS GUI)
 
-功能：
-- 话术列表面板，点击即发送到企业微信
-- 支持自定义话术、分组管理
-- 支持自定义输入发送
-- 窗口置顶，方便随时使用
-
-依赖：
-- tkinter (Python 内置)
+依赖:
+- customtkinter
 - sender.py (同目录)
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
 import json
 import os
 import subprocess
 import threading
+
+import customtkinter as ctk
+from tkinter import messagebox, simpledialog
 from AppKit import NSWorkspace
 from ApplicationServices import (
     AXUIElementCreateApplication,
@@ -31,8 +26,19 @@ from ApplicationServices import (
     kAXValueCGSizeType,
 )
 
-# 导入发送模块
 from sender import send_message, is_daxiang_running, NoChatWindowError, read_chat_messages
+
+# 颜色常量
+PRIMARY   = "#1677FF"
+PRIMARY_H = "#0958d9"   # hover
+CARD_BG   = "#e6f0ff"   # 选中卡片背景
+PANEL_BG  = "#f0f5ff"   # 面板背景
+DOT_OK    = "#52c41a"
+DOT_ERR   = "#ff4d4f"
+DOT_WAIT  = "#faad14"
+
+ctk.set_appearance_mode("system")   # 跟随 macOS 深色/浅色
+ctk.set_default_color_theme("blue")
 
 # ============================================================
 # 话术数据管理
@@ -108,21 +114,81 @@ def save_phrases(phrases: dict):
 
 
 # ============================================================
+# 话术卡片组件
+# ============================================================
+
+class PhraseCard(ctk.CTkFrame):
+    """单条话术卡片：左侧文本 + 右侧发送按钮"""
+
+    NORMAL_BG      = "white"
+    SELECTED_BG    = "#e6f0ff"
+    SELECTED_BORDER = "#bbd6ff"
+
+    def __init__(self, parent, text: str, on_send, on_select, **kwargs):
+        super().__init__(parent, corner_radius=10, fg_color=self.NORMAL_BG,
+                         border_width=1, border_color="#e8e8e8", **kwargs)
+        self._text = text
+        self._on_send = on_send
+        self._on_select = on_select
+        self._selected = False
+        self._build()
+
+    def _build(self):
+        self.grid_columnconfigure(0, weight=1)
+
+        self._label = ctk.CTkLabel(
+            self, text=self._text, wraplength=240,
+            justify="left", anchor="w",
+            text_color="#333",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+        )
+        self._label.grid(row=0, column=0, padx=(10, 6), pady=8, sticky="ew")
+
+        self._send_btn = ctk.CTkButton(
+            self, text="发送", width=44, height=26,
+            corner_radius=6, fg_color=CARD_BG,
+            text_color=PRIMARY, hover_color="#bbd6ff",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._on_send,
+        )
+        self._send_btn.grid(row=0, column=1, padx=(0, 8), pady=8)
+
+        self._label.bind("<Button-1>", lambda e: self._on_select(self))
+        self.bind("<Button-1>", lambda e: self._on_select(self))
+
+    @property
+    def text(self) -> str:
+        return self._text
+
+    def set_selected(self, selected: bool):
+        self._selected = selected
+        if selected:
+            self.configure(fg_color=self.SELECTED_BG, border_color=self.SELECTED_BORDER)
+            self._label.configure(text_color=PRIMARY)
+            self._send_btn.configure(fg_color=PRIMARY, text_color="white",
+                                      hover_color=PRIMARY_H)
+        else:
+            self.configure(fg_color=self.NORMAL_BG, border_color="#e8e8e8")
+            self._label.configure(text_color="#333")
+            self._send_btn.configure(fg_color=CARD_BG, text_color=PRIMARY,
+                                      hover_color="#bbd6ff")
+
+
+# ============================================================
 # GUI 应用
 # ============================================================
 
 class DaxiangSenderApp:
     def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("企业微信快捷发送 - Demo")
+        self.root = ctk.CTk()
+        self.root.title("企业微信快捷发送")
         self.root.attributes("-topmost", True)
-        self.root.resizable(False, False)   # 尺寸由同步逻辑控制，禁止手动拖拽
-        self.root.configure(bg="#f5f5f5")
+        self.root.resizable(False, False)
 
         self.phrases = load_phrases()
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
+        self._selected_card = None  # 当前选中的卡片
 
-        # 启动时同步读取企业微信窗口位置，直接以正确尺寸显示
         bounds = get_wechat_window_bounds()
         if bounds:
             wx, wy, ww, wh = bounds
@@ -132,192 +198,145 @@ class DaxiangSenderApp:
         self._last_bounds = bounds
 
         self._build_ui()
-        self.root.after(100, self._poll_snap)  # 启动轮询跟随
+        self.root.after(100, self._poll_snap)
 
     def _build_ui(self):
-        """构建界面"""
-        # 顶部状态栏
-        status_frame = tk.Frame(self.root, bg="#2c3e50", height=40)
-        status_frame.pack(fill=tk.X)
+        # ── 状态栏 ──
+        status_frame = ctk.CTkFrame(self.root, height=48, corner_radius=0, fg_color=PRIMARY)
+        status_frame.pack(fill="x")
         status_frame.pack_propagate(False)
 
-        self.status_label = tk.Label(
-            status_frame,
-            text="⏳ 检测中...",
-            fg="white",
-            bg="#2c3e50",
-            font=("PingFang SC", 12),
-        )
-        self.status_label.pack(side=tk.LEFT, padx=10, pady=8)
+        left = ctk.CTkFrame(status_frame, fg_color="transparent")
+        left.pack(side="left", padx=12, pady=12)
 
-        refresh_btn = tk.Button(
-            status_frame,
-            text="🔄",
-            command=self._check_status,
-            bg="#2c3e50",
-            fg="white",
-            borderwidth=0,
-            font=("", 14),
-        )
-        refresh_btn.pack(side=tk.RIGHT, padx=10)
+        self.status_dot = ctk.CTkLabel(left, text="●", text_color=DOT_WAIT,
+                                        font=ctk.CTkFont(size=10), width=14)
+        self.status_dot.pack(side="left")
 
-        # 分组选择
-        group_frame = tk.Frame(self.root, bg="#f5f5f5")
-        group_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        self.status_label = ctk.CTkLabel(left, text="检测中...",
+                                          text_color="white",
+                                          font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"))
+        self.status_label.pack(side="left", padx=(4, 0))
 
-        tk.Label(
-            group_frame, text="话术分组:", bg="#f5f5f5", font=("PingFang SC", 11)
-        ).pack(side=tk.LEFT)
+        ctk.CTkButton(status_frame, text="↻", width=32, height=32,
+                       corner_radius=8, fg_color="transparent",
+                       hover_color=PRIMARY_H, text_color="white",
+                       font=ctk.CTkFont(size=16),
+                       command=self._check_status).pack(side="right", padx=8)
 
-        self.group_var = tk.StringVar(value=self.current_group)
-        self.group_combo = ttk.Combobox(
+        # ── 分组选择 ──
+        group_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        group_frame.pack(fill="x", padx=12, pady=(10, 4))
+
+        ctk.CTkLabel(group_frame, text="分组",
+                      text_color="gray", font=ctk.CTkFont(size=11)).pack(side="left")
+
+        self.group_var = ctk.StringVar(value=self.current_group)
+        self.group_menu = ctk.CTkOptionMenu(
             group_frame,
-            textvariable=self.group_var,
             values=list(self.phrases.keys()),
-            state="readonly",
-            width=15,
+            variable=self.group_var,
+            width=120, height=28, corner_radius=8,
+            fg_color="white", button_color=PRIMARY,
+            text_color="#333",
+            command=self._on_group_change,
         )
-        self.group_combo.pack(side=tk.LEFT, padx=5)
-        self.group_combo.bind("<<ComboboxSelected>>", self._on_group_change)
+        self.group_menu.pack(side="left", padx=(6, 0))
 
-        add_group_btn = tk.Button(
-            group_frame,
-            text="+ 新分组",
-            command=self._add_group,
-            font=("PingFang SC", 10),
+        ctk.CTkButton(group_frame, text="+ 新分组", width=64, height=28,
+                       corner_radius=8, fg_color="transparent",
+                       border_width=1, border_color=PRIMARY,
+                       text_color=PRIMARY, hover_color=CARD_BG,
+                       font=ctk.CTkFont(size=11),
+                       command=self._add_group).pack(side="right")
+
+        # ── 话术卡片列表 ──
+        self.cards_frame = ctk.CTkScrollableFrame(
+            self.root, fg_color=PANEL_BG, corner_radius=0,
+            scrollbar_button_color=PRIMARY,
+            scrollbar_button_hover_color=PRIMARY_H,
         )
-        add_group_btn.pack(side=tk.RIGHT)
+        self.cards_frame.pack(fill="both", expand=True, padx=12, pady=(0, 4))
+        self.cards_frame.grid_columnconfigure(0, weight=1)
 
-        # 话术列表（可点击发送）
-        list_frame = tk.Frame(self.root, bg="#f5f5f5")
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        # ── 操作按钮 ──
+        btn_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=(0, 6))
+        btn_frame.grid_columnconfigure((0, 1), weight=1)
 
-        # 滚动条
-        scrollbar = ttk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.phrase_listbox = tk.Listbox(
-            list_frame,
-            font=("PingFang SC", 11),
-            selectmode=tk.SINGLE,
-            yscrollcommand=scrollbar.set,
-            bg="white",
-            selectbackground="#3498db",
-            selectforeground="white",
-            activestyle="none",
-            borderwidth=1,
-            relief=tk.SOLID,
-        )
-        self.phrase_listbox.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.phrase_listbox.yview)
-
-        # 双击发送
-        self.phrase_listbox.bind("<Double-Button-1>", self._on_double_click_send)
-
-        # 操作按钮区
-        btn_frame = tk.Frame(self.root, bg="#f5f5f5")
-        btn_frame.pack(fill=tk.X, padx=10, pady=5)
-
-        send_btn = tk.Button(
-            btn_frame,
-            text="📤 发送选中",
-            command=self._send_selected,
-            bg="#27ae60",
-            fg="#003300",
-            activebackground="#2ecc71",
-            font=("PingFang SC", 11, "bold"),
-            relief=tk.GROOVE,
-            width=12,
-        )
-        send_btn.pack(side=tk.LEFT, padx=(0, 5))
-
-        add_btn = tk.Button(
-            btn_frame,
-            text="➕ 添加话术",
+        ctk.CTkButton(
+            btn_frame, text="➕ 添加话术", height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#555", hover_color="#f0f0f0",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
             command=self._add_phrase,
-            font=("PingFang SC", 10),
-            width=10,
-        )
-        add_btn.pack(side=tk.LEFT, padx=5)
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
-        del_btn = tk.Button(
-            btn_frame,
-            text="🗑️ 删除",
+        ctk.CTkButton(
+            btn_frame, text="🗑️ 删除选中", height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#ffe0e0",
+            text_color="#ff4d4f", hover_color="#fff0f0",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
             command=self._delete_phrase,
-            font=("PingFang SC", 10),
-            width=8,
+        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        # ── 分隔线 ──
+        ctk.CTkFrame(self.root, height=1, fg_color="#dce8ff", corner_radius=0).pack(
+            fill="x", padx=12, pady=(2, 8))
+
+        # ── 自定义消息 ──
+        bottom_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        bottom_frame.pack(fill="x", padx=12, pady=(0, 10))
+
+        self.custom_input = ctk.CTkTextbox(
+            bottom_frame, height=60, corner_radius=10,
+            border_width=1, border_color="#dce8ff",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
         )
-        del_btn.pack(side=tk.RIGHT)
+        self.custom_input.pack(fill="x", pady=(0, 6))
 
-        # 自定义输入区
-        input_frame = tk.Frame(self.root, bg="#f5f5f5")
-        input_frame.pack(fill=tk.X, padx=10, pady=(5, 10))
-
-        tk.Label(
-            input_frame, text="自定义消息:", bg="#f5f5f5", font=("PingFang SC", 11)
-        ).pack(anchor=tk.W)
-
-        self.custom_input = tk.Text(
-            input_frame,
-            height=3,
-            font=("PingFang SC", 11),
-            borderwidth=1,
-            relief=tk.SOLID,
-        )
-        self.custom_input.pack(fill=tk.X, pady=(3, 5))
-
-        custom_send_btn = tk.Button(
-            input_frame,
-            text="发送自定义消息",
+        ctk.CTkButton(
+            bottom_frame, text="发送自定义消息", height=36, corner_radius=10,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=self._send_custom,
-            bg="#3498db",
-            fg="#00154f",
-            activebackground="#5dade2",
-            font=("PingFang SC", 11),
-            relief=tk.GROOVE,
-        )
-        custom_send_btn.pack(fill=tk.X)
+        ).pack(fill="x", pady=(0, 5))
 
-        # 读取聊天内容按钮
-        read_btn = tk.Button(
-            input_frame,
-            text="📋 读取聊天内容",
+        ctk.CTkButton(
+            bottom_frame, text="📋 读取聊天内容", height=34, corner_radius=10,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
             command=self._read_chat,
-            bg="#8e44ad",
-            fg="#2d0047",
-            activebackground="#a569bd",
-            font=("PingFang SC", 11),
-            relief=tk.GROOVE,
-        )
-        read_btn.pack(fill=tk.X, pady=(6, 0))
+        ).pack(fill="x")
 
-        # 底部提示
-        tip_label = tk.Label(
-            self.root,
-            text="💡 双击话术即可发送 | 请确保企业微信聊天窗口已打开",
-            bg="#f5f5f5",
-            fg="#7f8c8d",
-            font=("PingFang SC", 9),
-        )
-        tip_label.pack(side=tk.BOTTOM, pady=5)
-
-        # 初始化
-        self._refresh_list()
+        # ── 初始化 ──
+        self._refresh_cards()
         self._check_status()
 
-    def _refresh_list(self):
-        """刷新话术列表"""
-        self.phrase_listbox.delete(0, tk.END)
+    def _refresh_cards(self):
+        for widget in self.cards_frame.winfo_children():
+            widget.destroy()
+        self._selected_card = None
         group = self.group_var.get()
-        if group in self.phrases:
-            for phrase in self.phrases[group]:
-                # 截断显示，避免单行太长
-                display = phrase if len(phrase) <= 50 else phrase[:47] + "..."
-                self.phrase_listbox.insert(tk.END, display)
+        for phrase in self.phrases.get(group, []):
+            card = PhraseCard(
+                self.cards_frame,
+                text=phrase,
+                on_send=lambda p=phrase: self._do_send(p),
+                on_select=self._select_card,
+            )
+            card.pack(fill="x", pady=(0, 5))
 
-    def _on_group_change(self, event=None):
-        """切换分组"""
-        self._refresh_list()
+    def _select_card(self, card: "PhraseCard"):
+        if self._selected_card and self._selected_card != card:
+            self._selected_card.set_selected(False)
+        self._selected_card = card
+        card.set_selected(True)
+
+    def _on_group_change(self, value=None):
+        self.current_group = self.group_var.get()
+        self._refresh_cards()
 
     def _poll_snap(self):
         """每 100ms 直接在主线程读取窗口坐标（AX API 调用 <5ms，无需后台线程）"""
@@ -337,67 +356,91 @@ class DaxiangSenderApp:
         threading.Thread(target=check, daemon=True).start()
 
     def _update_status(self, running: bool):
-        """更新状态显示"""
         if running:
-            self.status_label.config(text="✅ 企业微信已运行", fg="#2ecc71")
+            self.status_dot.configure(text_color=DOT_OK)
+            self.status_label.configure(text="企业微信已连接")
         else:
-            self.status_label.config(text="❌ 企业微信未运行", fg="#e74c3c")
+            self.status_dot.configure(text_color=DOT_ERR)
+            self.status_label.configure(text="企业微信未运行")
 
-    def _send_selected(self):
-        """发送选中的话术"""
-        selection = self.phrase_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("提示", "请先选择一条话术")
-            return
+    # ── 辅助：对话框在 topmost 窗口下的兼容方法 ──────────────────
+    # macOS 上 CTk -topmost 窗口处于 NSFloatingWindowLevel，
+    # tkinter 原生 simpledialog/messagebox 是 NSNormalWindowLevel，
+    # 会被 CTk 窗口遮挡。修复方式：
+    #   - 文本输入 → ctk.CTkInputDialog（CTk 层级，可见）
+    #   - 警告/确认 → 弹出前临时关闭 topmost，结束后恢复
 
-        group = self.group_var.get()
-        idx = selection[0]
-        text = self.phrases[group][idx]
-        self._do_send(text)
+    def _ask_input(self, title: str, prompt: str) -> str | None:
+        """弹出文本输入框，临时关闭 topmost 确保对话框可见且可输入"""
+        self.root.attributes("-topmost", False)
+        dialog = ctk.CTkInputDialog(text=prompt, title=title)
+        result = dialog.get_input()
+        self.root.attributes("-topmost", True)
+        return result
 
-    def _on_double_click_send(self, event):
-        """双击直接发送"""
-        selection = self.phrase_listbox.curselection()
-        if selection:
+    def _show_warning(self, message: str):
+        """弹出警告框，临时关闭 topmost 确保可见"""
+        self.root.attributes("-topmost", False)
+        messagebox.showwarning("提示", message)
+        self.root.attributes("-topmost", True)
+
+    def _ask_yesno(self, title: str, message: str) -> bool:
+        """弹出确认框，临时关闭 topmost 确保可见"""
+        self.root.attributes("-topmost", False)
+        result = messagebox.askyesno(title, message)
+        self.root.attributes("-topmost", True)
+        return result
+
+    # ── 话术管理 ─────────────────────────────────────────────────
+
+    def _add_phrase(self):
+        text = self._ask_input("添加话术", "请输入话术内容：")
+        if text and text.strip():
             group = self.group_var.get()
-            idx = selection[0]
-            text = self.phrases[group][idx]
-            self._do_send(text)
+            self.phrases.setdefault(group, []).append(text.strip())
+            save_phrases(self.phrases)
+            self._refresh_cards()
+
+    def _delete_phrase(self):
+        if not self._selected_card:
+            self._show_warning("请先选中要删除的话术")
+            return
+        if self._ask_yesno("确认", "确定要删除这条话术吗？"):
+            group = self.group_var.get()
+            phrase = self._selected_card.text
+            if phrase in self.phrases.get(group, []):
+                self.phrases[group].remove(phrase)
+                save_phrases(self.phrases)
+                self._refresh_cards()
 
     def _send_custom(self):
-        """发送自定义消息"""
-        text = self.custom_input.get("1.0", tk.END).strip()
+        text = self.custom_input.get("1.0", "end").strip()
         if not text:
-            messagebox.showwarning("提示", "请输入消息内容")
+            self._show_warning("请输入消息内容")
             return
         self._do_send(text)
-        self.custom_input.delete("1.0", tk.END)
+        self.custom_input.delete("1.0", "end")
 
     def _do_send(self, text: str):
-        """执行发送（在后台线程中）"""
         def send_task():
             try:
                 send_message(text)
-                self.root.after(0, lambda: self.status_label.config(
-                    text="✅ 发送成功", fg="#2ecc71"
-                ))
+                self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
+                self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
             except NoChatWindowError as e:
-                msg = str(e)  # Python3 会在 except 块结束后删除 e，提前取值
-                self.root.after(0, lambda: messagebox.showwarning("提示", msg))
-                self.root.after(0, lambda: self.status_label.config(
-                    text="⚠️ 未选中聊天窗口", fg="#e67e22"
-                ))
+                msg = str(e)
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
+                self.root.after(0, lambda: self.status_label.configure(text="未选中聊天窗口"))
             except Exception:
-                self.root.after(0, lambda: self.status_label.config(
-                    text="❌ 发送失败", fg="#e74c3c"
-                ))
+                self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
+                self.root.after(0, lambda: self.status_label.configure(text="❌ 发送失败"))
             self.root.after(3000, self._check_status)
-
         threading.Thread(target=send_task, daemon=True).start()
 
     def _read_chat(self):
         """读取企业微信当前聊天内容并弹窗展示"""
-        self.status_label.config(text="⏳ 读取中...", fg="white")
+        self.status_label.configure(text="⏳ 读取中...")
 
         def fetch():
             msgs = read_chat_messages(max_messages=30)
@@ -406,99 +449,50 @@ class DaxiangSenderApp:
         threading.Thread(target=fetch, daemon=True).start()
 
     def _show_chat_popup(self, msgs: list):
-        """弹窗展示聊天内容"""
         self._check_status()
-
-        win = tk.Toplevel(self.root)
+        win = ctk.CTkToplevel(self.root)
         win.title("聊天内容")
-        win.geometry("500x460")
+        win.geometry("500x480")
         win.attributes("-topmost", True)
-        win.configure(bg="#f5f5f5")
 
-        # 标题栏
-        header = tk.Frame(win, bg="#2c3e50", height=36)
-        header.pack(fill=tk.X)
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header.pack(fill="x")
         header.pack_propagate(False)
-        tk.Label(
-            header,
-            text=f"共 {len(msgs)} 条消息",
-            fg="white", bg="#2c3e50",
-            font=("PingFang SC", 11),
-        ).pack(side=tk.LEFT, padx=10, pady=8)
-        tk.Button(
-            header, text="✕", command=win.destroy,
-            bg="#2c3e50", fg="white", borderwidth=0, font=("", 13),
-        ).pack(side=tk.RIGHT, padx=8)
+        ctk.CTkLabel(header, text=f"共 {len(msgs)} 条消息",
+                      text_color="white",
+                      font=ctk.CTkFont(family="PingFang SC", size=12)).pack(
+            side="left", padx=12, pady=12)
+        ctk.CTkButton(header, text="✕", width=32, height=32, corner_radius=8,
+                       fg_color="transparent", hover_color=PRIMARY_H,
+                       text_color="white", font=ctk.CTkFont(size=14),
+                       command=win.destroy).pack(side="right", padx=8)
 
-        # 消息文本区（带滚动条）
-        frame = tk.Frame(win, bg="#f5f5f5")
-        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
-
-        scrollbar = ttk.Scrollbar(frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        text_widget = tk.Text(
-            frame,
-            font=("PingFang SC", 11),
-            bg="white", fg="#2c3e50",
-            wrap=tk.WORD,
-            borderwidth=1, relief=tk.SOLID,
-            yscrollcommand=scrollbar.set,
-            state=tk.NORMAL,
-            padx=8, pady=6,
+        text_widget = ctk.CTkTextbox(
+            win, corner_radius=0, border_width=0,
+            font=ctk.CTkFont(family="PingFang SC", size=12),
         )
-        text_widget.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=text_widget.yview)
+        text_widget.pack(fill="both", expand=True, padx=10, pady=10)
 
         if not msgs:
-            text_widget.insert(tk.END, "未读取到消息，请先在企业微信中选中聊天窗口。")
+            text_widget.insert("end", "未读取到消息，请先在企业微信中选中聊天窗口。")
         else:
             for m in msgs:
                 time_str = f"[{m['time']}]  " if m['time'] else ""
-                text_widget.insert(tk.END, f"{time_str}{m['content']}\n\n")
-
-        text_widget.config(state=tk.DISABLED)
-        text_widget.see(tk.END)  # 滚动到最新消息
-
-    def _add_phrase(self):
-        """添加新话术"""
-        text = simpledialog.askstring("添加话术", "请输入话术内容：", parent=self.root)
-        if text and text.strip():
-            group = self.group_var.get()
-            if group not in self.phrases:
-                self.phrases[group] = []
-            self.phrases[group].append(text.strip())
-            save_phrases(self.phrases)
-            self._refresh_list()
-
-    def _delete_phrase(self):
-        """删除选中话术"""
-        selection = self.phrase_listbox.curselection()
-        if not selection:
-            messagebox.showwarning("提示", "请先选择要删除的话术")
-            return
-
-        if messagebox.askyesno("确认", "确定要删除这条话术吗？"):
-            group = self.group_var.get()
-            idx = selection[0]
-            self.phrases[group].pop(idx)
-            save_phrases(self.phrases)
-            self._refresh_list()
+                text_widget.insert("end", f"{time_str}{m['content']}\n\n")
+        text_widget.configure(state="disabled")
 
     def _add_group(self):
-        """添加新分组"""
-        name = simpledialog.askstring("新分组", "请输入分组名称：", parent=self.root)
+        name = self._ask_input("新分组", "请输入分组名称：")
         if name and name.strip():
             name = name.strip()
             if name not in self.phrases:
                 self.phrases[name] = []
                 save_phrases(self.phrases)
-                self.group_combo["values"] = list(self.phrases.keys())
+                self.group_menu.configure(values=list(self.phrases.keys()))
                 self.group_var.set(name)
-                self._refresh_list()
+                self._refresh_cards()
 
     def run(self):
-        """启动应用"""
         self.root.mainloop()
 
 
@@ -508,7 +502,7 @@ class DaxiangSenderApp:
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  企业微信快捷发送面板 (macOS Demo)")
+    print("  企业微信快捷发送面板")
     print("  请确保已授予辅助功能权限")
     print("=" * 50)
     app = DaxiangSenderApp()
