@@ -363,8 +363,35 @@ class DaxiangSenderApp:
             self.status_dot.configure(text_color=DOT_ERR)
             self.status_label.configure(text="企业微信未运行")
 
+    # ── 辅助：对话框在 topmost 窗口下的兼容方法 ──────────────────
+    # macOS 上 CTk -topmost 窗口处于 NSFloatingWindowLevel，
+    # tkinter 原生 simpledialog/messagebox 是 NSNormalWindowLevel，
+    # 会被 CTk 窗口遮挡。修复方式：
+    #   - 文本输入 → ctk.CTkInputDialog（CTk 层级，可见）
+    #   - 警告/确认 → 弹出前临时关闭 topmost，结束后恢复
+
+    def _ask_input(self, title: str, prompt: str) -> str | None:
+        """弹出文本输入框，使用 CTkInputDialog 避免被 topmost 遮挡"""
+        dialog = ctk.CTkInputDialog(text=prompt, title=title)
+        return dialog.get_input()
+
+    def _show_warning(self, message: str):
+        """弹出警告框，临时关闭 topmost 确保可见"""
+        self.root.attributes("-topmost", False)
+        messagebox.showwarning("提示", message)
+        self.root.attributes("-topmost", True)
+
+    def _ask_yesno(self, title: str, message: str) -> bool:
+        """弹出确认框，临时关闭 topmost 确保可见"""
+        self.root.attributes("-topmost", False)
+        result = messagebox.askyesno(title, message)
+        self.root.attributes("-topmost", True)
+        return result
+
+    # ── 话术管理 ─────────────────────────────────────────────────
+
     def _add_phrase(self):
-        text = simpledialog.askstring("添加话术", "请输入话术内容：", parent=self.root)
+        text = self._ask_input("添加话术", "请输入话术内容：")
         if text and text.strip():
             group = self.group_var.get()
             self.phrases.setdefault(group, []).append(text.strip())
@@ -373,9 +400,9 @@ class DaxiangSenderApp:
 
     def _delete_phrase(self):
         if not self._selected_card:
-            messagebox.showwarning("提示", "请先选中要删除的话术", parent=self.root)
+            self._show_warning("请先选中要删除的话术")
             return
-        if messagebox.askyesno("确认", "确定要删除这条话术吗？", parent=self.root):
+        if self._ask_yesno("确认", "确定要删除这条话术吗？"):
             group = self.group_var.get()
             phrase = self._selected_card.text
             if phrase in self.phrases.get(group, []):
@@ -386,7 +413,7 @@ class DaxiangSenderApp:
     def _send_custom(self):
         text = self.custom_input.get("1.0", "end").strip()
         if not text:
-            messagebox.showwarning("提示", "请输入消息内容", parent=self.root)
+            self._show_warning("请输入消息内容")
             return
         self._do_send(text)
         self.custom_input.delete("1.0", "end")
@@ -399,7 +426,7 @@ class DaxiangSenderApp:
                 self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
             except NoChatWindowError as e:
                 msg = str(e)
-                self.root.after(0, lambda: messagebox.showwarning("提示", msg))
+                self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
                 self.root.after(0, lambda: self.status_label.configure(text="未选中聊天窗口"))
             except Exception:
@@ -452,7 +479,7 @@ class DaxiangSenderApp:
         text_widget.configure(state="disabled")
 
     def _add_group(self):
-        name = simpledialog.askstring("新分组", "请输入分组名称：", parent=self.root)
+        name = self._ask_input("新分组", "请输入分组名称：")
         if name and name.strip():
             name = name.strip()
             if name not in self.phrases:
