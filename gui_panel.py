@@ -29,7 +29,6 @@ from ApplicationServices import (
     kAXSizeAttribute,
     kAXValueCGPointType,
     kAXValueCGSizeType,
-    kAXMinimizedAttribute,
 )
 
 # 导入发送模块
@@ -91,25 +90,6 @@ def get_wechat_window_bounds() -> tuple | None:
         return None
 
 
-def is_wechat_minimized_or_hidden() -> bool:
-    """检查企业微信是否最小化（Cmd+M）或隐藏（Cmd+H）"""
-    global _wechat_ax
-    try:
-        apps = NSWorkspace.sharedWorkspace().runningApplications()
-        app = next((a for a in apps if a.localizedName() == "企业微信"), None)
-        if app is None or app.isHidden():
-            return True
-        if _wechat_ax is None:
-            return False
-        _, windows = AXUIElementCopyAttributeValue(_wechat_ax, kAXWindowsAttribute, None)
-        if not windows:
-            return True
-        _, minimized = AXUIElementCopyAttributeValue(windows[0], kAXMinimizedAttribute, None)
-        return bool(minimized)
-    except Exception:
-        return False
-
-
 def load_phrases() -> dict:
     """加载话术库"""
     if os.path.exists(DATA_FILE):
@@ -150,7 +130,6 @@ class DaxiangSenderApp:
         else:
             self.root.geometry("420x600")
         self._last_bounds = bounds
-        self._wechat_was_hidden = False  # 上一次检测时企业微信是否不可见
 
         self._build_ui()
         self.root.after(100, self._poll_snap)  # 启动轮询跟随
@@ -341,24 +320,12 @@ class DaxiangSenderApp:
         self._refresh_list()
 
     def _poll_snap(self):
-        """每 100ms 读取企业微信窗口状态，同步位置和最小化/隐藏状态"""
-        hidden = is_wechat_minimized_or_hidden()
-
-        if hidden:
-            if not self._wechat_was_hidden:
-                self._wechat_was_hidden = True
-                self.root.iconify()
-        else:
-            if self._wechat_was_hidden:
-                self._wechat_was_hidden = False
-                self.root.deiconify()
-            # 企业微信可见时正常跟随位置
-            bounds = get_wechat_window_bounds()
-            if bounds and bounds != self._last_bounds:
-                self._last_bounds = bounds
-                wx, wy, ww, wh = bounds
-                self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
-
+        """每 100ms 直接在主线程读取窗口坐标（AX API 调用 <5ms，无需后台线程）"""
+        bounds = get_wechat_window_bounds()
+        if bounds and bounds != self._last_bounds:
+            self._last_bounds = bounds
+            wx, wy, ww, wh = bounds
+            self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
         self.root.after(100, self._poll_snap)
 
     def _check_status(self):
