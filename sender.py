@@ -23,7 +23,7 @@ from collections import deque
 from AppKit import (
     NSPasteboard, NSStringPboardType, NSPasteboardTypeString,
     NSWorkspace, NSApplicationActivateIgnoringOtherApps,
-    NSImage,
+    NSImage, NSBitmapImageRep,
 )
 from ApplicationServices import (
     AXUIElementCreateApplication,
@@ -348,9 +348,17 @@ def send_image(path: str) -> bool:
 
     original_text = get_clipboard()   # 保存原文字剪贴板
 
+    # 企业微信（Electron/Chromium）需要 public.png 格式，纯 TIFF 不被识别
+    # 与 macOS 截图工具写入格式保持一致
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
-    pb.writeObjects_([image])
+    tiff_data = image.TIFFRepresentation()
+    bitmap = NSBitmapImageRep.imageRepWithData_(tiff_data)
+    png_data = bitmap.representationUsingType_properties_(4, None)  # 4 = NSPNGFileType
+    if png_data:
+        pb.setData_forType_(png_data, "public.png")
+    else:
+        pb.writeObjects_([image])   # 兜底：写 TIFF
 
     time.sleep(0.1)
     paste()
