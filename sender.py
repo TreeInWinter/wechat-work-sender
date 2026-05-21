@@ -346,6 +346,8 @@ def send_image(path: str) -> bool:
     if image is None:
         raise ValueError(f"无法加载图片: {expanded}")
 
+    original_text = get_clipboard()   # 保存原文字剪贴板
+
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
     pb.writeObjects_([image])
@@ -355,6 +357,10 @@ def send_image(path: str) -> bool:
     time.sleep(0.5)
     press_enter()
     time.sleep(0.2)
+
+    # 恢复文字剪贴板（图片数据无法恢复，只恢复文字内容）
+    if original_text:
+        set_clipboard(original_text)
 
     print(f"[成功] 图片已发送: {os.path.basename(expanded)}")
     return True
