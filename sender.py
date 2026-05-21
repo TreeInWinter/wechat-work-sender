@@ -273,6 +273,16 @@ def press_enter():
     subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
+def press_shift_enter():
+    """用 AppleScript 发送 Shift+Return，在输入框内换行（不发送消息）"""
+    script = '''
+    tell application "System Events"
+        keystroke return using {shift down}
+    end tell
+    '''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
 def type_text(text: str):
     """用 AppleScript keystroke 直接模拟键盘输入，支持中文 Unicode。
 
@@ -440,6 +450,9 @@ def send_blocks(blocks: list) -> bool:
                 if image is None:
                     raise ValueError(f"无法加载图片: {expanded}")
 
+                press_shift_enter()   # 图片前换行，让图片独占一行
+                time.sleep(0.05)
+
                 pb = NSPasteboard.generalPasteboard()
                 pb.clearContents()
                 tiff_data = image.TIFFRepresentation()
@@ -451,9 +464,14 @@ def send_blocks(blocks: list) -> bool:
                     pb.writeObjects_([image])
 
                 paste()
-                time.sleep(0.5)   # 图片预览需要更多渲染时间
+                time.sleep(0.6)   # 图片预览需要充足渲染时间
 
-        # 所有内容就位，统一发送
+                press_shift_enter()   # 图片后换行
+                time.sleep(0.05)
+
+        # 所有内容就位，重新聚焦确保 Enter 落到输入框，再发送
+        focus_chat_input()
+        time.sleep(0.2)
         press_enter()
 
     finally:
