@@ -381,6 +381,77 @@ def send_image(path: str, auto_activate: bool = True) -> bool:
     return True
 
 
+def send_blocks(blocks: list) -> bool:
+    """将图文混排内容一次性发送到企业微信。
+
+    先将所有 block 依次粘贴进输入框（不按 Enter），
+    最后统一按一次 Enter 发送，保证文字和图片在同一次操作中发出。
+
+    参数：
+        blocks: [{"type":"text","content":"..."}, {"type":"image","path":"..."}, ...]
+    """
+    if not blocks:
+        return True
+
+    if not is_daxiang_running():
+        print("[错误] 企业微信未运行")
+        return False
+
+    if not activate_daxiang():
+        return False
+
+    if not focus_chat_input():
+        raise NoChatWindowError("请先在企业微信中选中聊天窗口")
+
+    original_text = get_clipboard()
+
+    try:
+        for block in blocks:
+            btype = block.get("type")
+
+            if btype == "text":
+                content = block.get("content", "").strip()
+                if not content:
+                    continue
+                set_clipboard(content)
+                paste()
+                time.sleep(0.2)   # 等待文字渲染到输入框
+
+            elif btype == "image":
+                expanded = os.path.expanduser(block.get("path", ""))
+                if not expanded or not os.path.exists(expanded):
+                    raise FileNotFoundError(f"图片不存在: {expanded}")
+
+                image = NSImage.alloc().initWithContentsOfFile_(expanded)
+                if image is None:
+                    raise ValueError(f"无法加载图片: {expanded}")
+
+                pb = NSPasteboard.generalPasteboard()
+                pb.clearContents()
+                tiff_data = image.TIFFRepresentation()
+                bitmap = NSBitmapImageRep.imageRepWithData_(tiff_data)
+                png_data = bitmap.representationUsingType_properties_(4, None)
+                if png_data:
+                    pb.setData_forType_(png_data, "public.png")
+                else:
+                    pb.writeObjects_([image])
+
+                paste()
+                time.sleep(0.5)   # 图片预览需要更多渲染时间
+
+        # 所有内容就位，统一发送
+        press_enter()
+
+    finally:
+        if original_text:
+            set_clipboard(original_text)
+
+    sent = sum(1 for b in blocks if b.get("type") == "text" and b.get("content", "").strip()
+               or b.get("type") == "image")
+    print(f"[成功] 发送 {sent} 个 block")
+    return True
+
+
 def send_messages_batch(messages: list, interval: float = 1.0):
     """
     批量发送多条消息。

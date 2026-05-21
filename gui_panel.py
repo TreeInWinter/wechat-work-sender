@@ -28,7 +28,7 @@ from ApplicationServices import (
     kAXValueCGSizeType,
 )
 
-from sender import send_message, send_image, is_daxiang_running, NoChatWindowError, read_chat_messages
+from sender import send_message, send_image, send_blocks, is_daxiang_running, NoChatWindowError, read_chat_messages
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -848,21 +848,16 @@ class DaxiangSenderApp:
         self.custom_input.delete("1.0", "end")
 
     def _do_send(self, phrase):
-        """发送话术（str 或 list of blocks），按块顺序依次发出文字和图片。"""
+        """发送话术（str 或 list of blocks）。
+
+        统一使用 send_blocks()：所有 block 先依次粘贴进输入框，
+        最后一次 Enter 发送，文字和图片在同一次操作中发出。
+        """
         blocks = normalize_phrase(phrase)
 
         def send_task():
             try:
-                first = True   # 第一个 block 需激活，后续跳过避免打断焦点
-                for block in blocks:
-                    if block.get("type") == "text" and block.get("content", "").strip():
-                        send_message(block["content"], auto_activate=first)
-                        first = False
-                        time.sleep(0.8)  # 给企业微信 UI 更新留足时间
-                    elif block.get("type") == "image":
-                        send_image(block["path"], auto_activate=first)
-                        first = False
-                        time.sleep(0.8)
+                send_blocks(blocks)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
                 self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
             except NoChatWindowError as e:
