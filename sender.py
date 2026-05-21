@@ -273,6 +273,21 @@ def press_enter():
     subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
+def type_text(text: str):
+    """用 AppleScript keystroke 直接模拟键盘输入，支持中文 Unicode。
+
+    比剪贴板粘贴（Cmd+V）更接近用户手动输入：企业微信会将其保留在
+    输入框 buffer 中，后续粘贴图片后 Enter 可将两者作为一条消息发出。
+    """
+    escaped = text.replace('\\', '\\\\').replace('"', '\\"')
+    script = f'''
+    tell application "System Events"
+        keystroke "{escaped}"
+    end tell
+    '''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
 def select_all():
     """模拟 Cmd+A 全选"""
     press_key(KEY_A, kCGEventFlagMaskCommand)
@@ -413,9 +428,8 @@ def send_blocks(blocks: list) -> bool:
                 content = block.get("content", "").strip()
                 if not content:
                     continue
-                set_clipboard(content)
-                paste()
-                time.sleep(0.2)   # 等待文字渲染到输入框
+                type_text(content)   # 模拟键盘输入，保留在 buffer 中不触发独立粘贴事件
+                time.sleep(0.1)
 
             elif btype == "image":
                 expanded = os.path.expanduser(block.get("path", ""))
