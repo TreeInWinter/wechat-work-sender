@@ -504,81 +504,37 @@ def send_image(path: str, auto_activate: bool = True) -> bool:
 
 
 def send_blocks(blocks: list) -> bool:
-    """将图文混排内容一次性发送到企业微信。
+    """依次发送图文混排的各个 block。
 
-    先将所有 block 依次粘贴进输入框（不按 Enter），
-    最后统一按一次 Enter 发送，保证文字和图片在同一次操作中发出。
+    每个 block 独立发送：
+    - text  → send_message()（剪贴板粘贴 + Enter，已验证可靠）
+    - image → send_image()（PNG 格式剪贴板 + Enter，已验证可靠）
 
-    参数：
-        blocks: [{"type":"text","content":"..."}, {"type":"image","path":"..."}, ...]
+    第一个 block 正常激活企业微信，后续 block 跳过重复激活。
     """
     if not blocks:
         return True
 
-    if not is_daxiang_running():
-        print("[错误] 企业微信未运行")
-        return False
+    first = True
+    for block in blocks:
+        btype = block.get("type")
 
-    if not activate_daxiang():
-        return False
+        if btype == "text":
+            content = block.get("content", "").strip()
+            if not content:
+                continue
+            send_message(content, auto_activate=first)
+            first = False
+            time.sleep(0.8)
 
-    if not focus_chat_input():
-        raise NoChatWindowError("请先在企业微信中选中聊天窗口")
+        elif btype == "image":
+            path = block.get("path", "")
+            if not path:
+                continue
+            send_image(path, auto_activate=first)
+            first = False
+            time.sleep(0.8)
 
-    original_text = get_clipboard()
-
-    try:
-        for block in blocks:
-            btype = block.get("type")
-
-            if btype == "text":
-                content = block.get("content", "").strip()
-                if not content:
-                    continue
-                type_text(content)   # 模拟键盘输入，保留在 buffer 中不触发独立粘贴事件
-                time.sleep(0.1)
-
-            elif btype == "image":
-                expanded = os.path.expanduser(block.get("path", ""))
-                if not expanded or not os.path.exists(expanded):
-                    raise FileNotFoundError(f"图片不存在: {expanded}")
-
-                image = NSImage.alloc().initWithContentsOfFile_(expanded)
-                if image is None:
-                    raise ValueError(f"无法加载图片: {expanded}")
-
-                press_shift_enter()   # 图片前换行，让图片独占一行
-                time.sleep(0.05)
-
-                pb = NSPasteboard.generalPasteboard()
-                pb.clearContents()
-                tiff_data = image.TIFFRepresentation()
-                bitmap = NSBitmapImageRep.imageRepWithData_(tiff_data)
-                png_data = bitmap.representationUsingType_properties_(4, None)
-                if png_data:
-                    pb.setData_forType_(png_data, "public.png")
-                else:
-                    pb.writeObjects_([image])
-
-                paste()
-                time.sleep(0.6)   # 图片预览需要充足渲染时间
-
-                press_shift_enter()   # 图片后换行
-                time.sleep(0.05)
-
-        # 所有内容就位，等待 UI 稳定后发送
-        # 用鼠标点击发送按钮（比键盘 Enter 更可靠，绕过 Electron 事件转发层）
-        time.sleep(0.5)
-        if not click_send_button():
-            press_enter()   # 兜底：AX 找不到发送按钮时用 AppleScript Enter
-
-    finally:
-        if original_text:
-            set_clipboard(original_text)
-
-    sent = sum(1 for b in blocks if b.get("type") == "text" and b.get("content", "").strip()
-               or b.get("type") == "image")
-    print(f"[成功] 发送 {sent} 个 block")
     return True
 
 
