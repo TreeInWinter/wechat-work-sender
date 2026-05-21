@@ -525,7 +525,7 @@ def send_blocks(blocks: list) -> bool:
                 continue
             send_message(content, auto_activate=first)
             first = False
-            time.sleep(0.8)
+            time.sleep(0.3)
 
         elif btype == "image":
             path = block.get("path", "")
@@ -533,7 +533,7 @@ def send_blocks(blocks: list) -> bool:
                 continue
             send_image(path, auto_activate=first)
             first = False
-            time.sleep(0.8)
+            time.sleep(0.3)
 
     return True
 
