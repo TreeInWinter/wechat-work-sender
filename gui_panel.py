@@ -327,41 +327,66 @@ class PhraseCard(ctk.CTkFrame):
     SELECTED_BG    = "#e6f0ff"
     SELECTED_BORDER = "#bbd6ff"
 
-    def __init__(self, parent, text: str, on_send, on_select, **kwargs):
+    def __init__(self, parent, phrase, on_send, on_select, on_edit=None, **kwargs):
         super().__init__(parent, corner_radius=10, fg_color=self.NORMAL_BG,
                          border_width=1, border_color="#e8e8e8", **kwargs)
-        self._text = text
+        self._phrase = phrase
         self._on_send = on_send
         self._on_select = on_select
+        self._on_edit = on_edit
         self._selected = False
         self._build()
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
 
+        preview = phrase_preview_text(self._phrase)
+        has_img = has_images(self._phrase)
+
         self._label = ctk.CTkLabel(
-            self, text=self._text, wraplength=240,
+            self,
+            text=("🖼 " if has_img else "") + preview,
+            wraplength=200,
             justify="left", anchor="w",
             text_color="#333",
             font=ctk.CTkFont(family="PingFang SC", size=12),
         )
-        self._label.grid(row=0, column=0, padx=(10, 6), pady=8, sticky="ew")
+        self._label.grid(row=0, column=0, padx=(10, 4), pady=8, sticky="ew")
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.grid(row=0, column=1, padx=(0, 6), pady=8)
+
+        if self._on_edit:
+            ctk.CTkButton(
+                btn_frame, text="编辑", width=36, height=22,
+                corner_radius=4, fg_color="transparent",
+                border_width=1, border_color="#d9d9d9",
+                text_color="#888", hover_color="#f0f0f0",
+                font=ctk.CTkFont(size=10),
+                command=self._on_edit,
+            ).pack(side="top", pady=(0, 3))
 
         self._send_btn = ctk.CTkButton(
-            self, text="发送", width=44, height=26,
+            btn_frame, text="发送", width=44, height=26,
             corner_radius=6, fg_color=CARD_BG,
             text_color=PRIMARY, hover_color="#bbd6ff",
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self._on_send,
         )
-        self._send_btn.grid(row=0, column=1, padx=(0, 8), pady=8)
+        self._send_btn.pack(side="top")
 
         self._label.bind("<Button-1>", lambda e: self._on_select(self))
         self.bind("<Button-1>", lambda e: self._on_select(self))
 
     @property
     def text(self) -> str:
-        return self._text
+        """纯文本摘要（向后兼容）。"""
+        return phrase_preview_text(self._phrase)
+
+    @property
+    def phrase(self):
+        """原始话术值（str 或 list of blocks）。"""
+        return self._phrase
 
     def set_selected(self, selected: bool):
         self._selected = selected
