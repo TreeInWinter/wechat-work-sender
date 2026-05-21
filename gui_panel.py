@@ -143,6 +143,26 @@ def has_images(phrase) -> bool:
     return any(b.get("type") == "image" for b in normalize_phrase(phrase))
 
 
+def make_thumbnail(path: str, size: tuple = (72, 54)):
+    """用 Pillow 生成 CTkImage 缩略图。加载失败返回 None。"""
+    try:
+        from PIL import Image as PILImage
+        expanded = os.path.expanduser(path)
+        img = PILImage.open(expanded).convert("RGBA")
+        img.thumbnail((size[0] * 3, size[1] * 3), PILImage.LANCZOS)
+        # 居中裁剪到目标尺寸
+        w, h = img.size
+        tw, th = size
+        left = (w - tw) // 2 if w > tw else 0
+        top  = (h - th) // 2 if h > th else 0
+        img = img.crop((left, top, left + min(w, tw), top + min(h, th)))
+        new = PILImage.new("RGBA", size, (240, 244, 255, 255))
+        new.paste(img, ((tw - min(w, tw)) // 2, (th - min(h, th)) // 2))
+        return ctk.CTkImage(light_image=new, dark_image=new, size=size)
+    except Exception:
+        return None
+
+
 # ============================================================
 # 块编辑器
 # ============================================================
