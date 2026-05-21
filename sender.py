@@ -44,6 +44,11 @@ from Quartz import (
     kCGHIDEventTap,
     kCGEventKeyDown,
     kCGEventKeyUp,
+    CGEventCreateMouseEvent,
+    kCGEventLeftMouseDown,
+    kCGEventLeftMouseUp,
+    kCGMouseButtonLeft,
+    CGPointMake,
 )
 
 
@@ -285,6 +290,96 @@ def press_shift_enter():
     subprocess.run(["osascript", "-e", script], capture_output=True)
 
 
+def _mouse_click(x: float, y: float):
+    """在屏幕坐标 (x, y) 处模拟鼠标左键单击。"""
+    pos = CGPointMake(x, y)
+    down = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, pos, kCGMouseButtonLeft)
+    up   = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp,   pos, kCGMouseButtonLeft)
+    CGEventPost(kCGHIDEventTap, down)
+    time.sleep(0.05)
+    CGEventPost(kCGHIDEventTap, up)
+    time.sleep(0.05)
+
+
+def click_send_button() -> bool:
+    """在企业微信聊天输入区找到发送按钮并点击。
+    优先用 AX AXPress；失败则用鼠标点击按钮中心。
+    """
+    from ApplicationServices import (
+        AXUIElementCopyAttributeValue, kAXWindowsAttribute,
+        kAXRoleAttribute, kAXChildrenAttribute,
+        kAXPositionAttribute, kAXSizeAttribute,
+        AXUIElementPerformAction, AXUIElementCopyActionNames,
+        AXValueGetValue, kAXValueCGPointType, kAXValueCGSizeType,
+        kAXPressAction,
+    )
+    from collections import deque
+
+    ax = _get_ax_app()
+    if ax is None:
+        return False
+    try:
+        _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+        if not windows:
+            return False
+
+        win = windows[0]
+        # 获取窗口底部坐标
+        _, wpos_ref = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
+        _, wsz_ref  = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
+        _, wpt = AXValueGetValue(wpos_ref, kAXValueCGPointType, None)
+        _, wsz = AXValueGetValue(wsz_ref,  kAXValueCGSizeType,  None)
+        win_bottom = wpt.y + wsz.height
+
+        # BFS 找最靠近窗口底部右侧的 AXButton（即发送按钮）
+        queue = deque([(win, 0)])
+        best = None   # (y_distance_to_bottom, x_right, element, cx, cy)
+        while queue:
+            el, d = queue.popleft()
+            if d > 12:
+                continue
+            try:
+                _, role = AXUIElementCopyAttributeValue(el, kAXRoleAttribute, None)
+                if role == "AXButton":
+                    _, pr = AXUIElementCopyAttributeValue(el, kAXPositionAttribute, None)
+                    _, sr = AXUIElementCopyAttributeValue(el, kAXSizeAttribute, None)
+                    if pr and sr:
+                        _, pt = AXValueGetValue(pr, kAXValueCGPointType, None)
+                        _, sz = AXValueGetValue(sr, kAXValueCGSizeType,  None)
+                        if pt and sz and sz.width >= 50:   # 排除小图标按钮
+                            dist = win_bottom - (pt.y + sz.height)
+                            cx = pt.x + sz.width / 2
+                            cy = pt.y + sz.height / 2
+                            if best is None or dist < best[0] or (dist == best[0] and cx > best[1]):
+                                best = (dist, cx, el, cx, cy)
+                _, ch = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, None)
+                if ch:
+                    for c in ch:
+                        queue.append((c, d + 1))
+            except Exception:
+                pass
+
+        if best is None:
+            return False
+
+        _, _, btn, cx, cy = best
+        # 先尝试 AX Press
+        try:
+            _, actions = AXUIElementCopyActionNames(btn)
+            if actions and kAXPressAction in actions:
+                AXUIElementPerformAction(btn, kAXPressAction)
+                return True
+        except Exception:
+            pass
+
+        # AX Press 不可用时，用鼠标点击
+        _mouse_click(cx, cy)
+        return True
+
+    except Exception:
+        return False
+
+
 def type_text(text: str):
     """用 AppleScript keystroke 直接模拟键盘输入，支持中文 Unicode。
 
@@ -472,8 +567,10 @@ def send_blocks(blocks: list) -> bool:
                 time.sleep(0.05)
 
         # 所有内容就位，等待 UI 稳定后发送
+        # 用鼠标点击发送按钮（比键盘 Enter 更可靠，绕过 Electron 事件转发层）
         time.sleep(0.5)
-        press_key(KEY_RETURN)   # CGEvent Enter（与图片粘贴同一事件通道）
+        if not click_send_button():
+            press_enter()   # 兜底：AX 找不到发送按钮时用 AppleScript Enter
 
     finally:
         if original_text:
