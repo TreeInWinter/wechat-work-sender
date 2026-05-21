@@ -623,12 +623,18 @@ class DaxiangSenderApp:
     # ── 话术管理 ─────────────────────────────────────────────────
 
     def _add_phrase(self):
-        text = self._ask_input("添加话术", "请输入话术内容：")
-        if text and text.strip():
-            group = self.group_var.get()
-            self.phrases.setdefault(group, []).append(text.strip())
-            save_phrases(self.phrases)
-            self._refresh_cards()
+        self.root.attributes("-topmost", False)
+        editor = BlockEditor(self.root)
+        result = editor.get_result()
+        self.root.attributes("-topmost", True)
+
+        if not result:
+            return
+        group = self.group_var.get()
+        phrase = result[0]["content"] if len(result) == 1 and result[0]["type"] == "text" else result
+        self.phrases.setdefault(group, []).append(phrase)
+        save_phrases(self.phrases)
+        self._refresh_cards()
 
     def _delete_phrase(self):
         if not self._selected_card:
@@ -636,11 +642,14 @@ class DaxiangSenderApp:
             return
         if self._ask_yesno("确认", "确定要删除这条话术吗？"):
             group = self.group_var.get()
-            phrase = self._selected_card.text
-            if phrase in self.phrases.get(group, []):
-                self.phrases[group].remove(phrase)
-                save_phrases(self.phrases)
-                self._refresh_cards()
+            target = self._selected_card.phrase
+            phrases_list = self.phrases.get(group, [])
+            for i, p in enumerate(phrases_list):
+                if p == target:
+                    phrases_list.pop(i)
+                    break
+            save_phrases(self.phrases)
+            self._refresh_cards()
 
     def _edit_phrase(self, idx: int):
         """打开 BlockEditor 编辑第 idx 条话术并保存。"""
