@@ -473,7 +473,7 @@ def send_blocks(blocks: list) -> bool:
 
         # 所有内容就位，等待 UI 稳定后发送
         time.sleep(0.5)
-        press_enter()
+        press_key(KEY_RETURN)   # CGEvent Enter（与图片粘贴同一事件通道）
 
     finally:
         if original_text:
