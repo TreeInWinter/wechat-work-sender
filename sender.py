@@ -326,8 +326,14 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
     return True
 
 
-def send_image(path: str) -> bool:
-    """向企业微信当前聊天窗口发送一张图片。"""
+def send_image(path: str, auto_activate: bool = True) -> bool:
+    """向企业微信当前聊天窗口发送一张图片。
+
+    参数：
+        path: 图片文件路径（支持 ~ 展开）
+        auto_activate: 是否重新激活企业微信窗口。顺序发送时传 False，
+                       避免重复激活打断当前输入框焦点。
+    """
     expanded = os.path.expanduser(path)
     if not os.path.exists(expanded):
         raise FileNotFoundError(f"图片不存在: {expanded}")
@@ -336,8 +342,9 @@ def send_image(path: str) -> bool:
         print("[错误] 企业微信未运行")
         return False
 
-    if not activate_daxiang():
-        return False
+    if auto_activate:
+        if not activate_daxiang():
+            return False
 
     if not focus_chat_input():
         raise NoChatWindowError("请先在企业微信中选中聊天窗口")

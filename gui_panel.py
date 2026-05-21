@@ -853,13 +853,16 @@ class DaxiangSenderApp:
 
         def send_task():
             try:
+                first = True   # 第一个 block 需激活，后续跳过避免打断焦点
                 for block in blocks:
                     if block.get("type") == "text" and block.get("content", "").strip():
-                        send_message(block["content"])
-                        time.sleep(0.3)
+                        send_message(block["content"], auto_activate=first)
+                        first = False
+                        time.sleep(0.8)  # 给企业微信 UI 更新留足时间
                     elif block.get("type") == "image":
-                        send_image(block["path"])
-                        time.sleep(0.5)
+                        send_image(block["path"], auto_activate=first)
+                        first = False
+                        time.sleep(0.8)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
                 self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
             except NoChatWindowError as e:
