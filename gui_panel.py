@@ -28,7 +28,7 @@ from ApplicationServices import (
     kAXValueCGSizeType,
 )
 
-from sender import send_message, is_daxiang_running, NoChatWindowError, read_chat_messages
+from sender import send_message, send_image, is_daxiang_running, NoChatWindowError, read_chat_messages
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -547,12 +547,13 @@ class DaxiangSenderApp:
             widget.destroy()
         self._selected_card = None
         group = self.group_var.get()
-        for phrase in self.phrases.get(group, []):
+        for i, phrase in enumerate(self.phrases.get(group, [])):
             card = PhraseCard(
                 self.cards_frame,
-                text=phrase,
+                phrase=phrase,
                 on_send=lambda p=phrase: self._do_send(p),
                 on_select=self._select_card,
+                on_edit=lambda idx=i: self._edit_phrase(idx),
             )
             card.pack(fill="x", pady=(0, 5))
 
@@ -641,6 +642,27 @@ class DaxiangSenderApp:
                 save_phrases(self.phrases)
                 self._refresh_cards()
 
+    def _edit_phrase(self, idx: int):
+        """打开 BlockEditor 编辑第 idx 条话术并保存。"""
+        group = self.group_var.get()
+        phrases_list = self.phrases.get(group, [])
+        if idx >= len(phrases_list):
+            return
+
+        self.root.attributes("-topmost", False)
+        editor = BlockEditor(self.root, initial_phrase=phrases_list[idx])
+        result = editor.get_result()
+        self.root.attributes("-topmost", True)
+
+        if result is None:
+            return
+        if len(result) == 1 and result[0]["type"] == "text":
+            phrases_list[idx] = result[0]["content"]
+        else:
+            phrases_list[idx] = result
+        save_phrases(self.phrases)
+        self._refresh_cards()
+
     def _send_custom(self):
         text = self.custom_input.get("1.0", "end").strip()
         if not text:
@@ -649,10 +671,19 @@ class DaxiangSenderApp:
         self._do_send(text)
         self.custom_input.delete("1.0", "end")
 
-    def _do_send(self, text: str):
+    def _do_send(self, phrase):
+        """发送话术（str 或 list of blocks），按块顺序依次发出文字和图片。"""
+        blocks = normalize_phrase(phrase)
+
         def send_task():
             try:
-                send_message(text)
+                for block in blocks:
+                    if block.get("type") == "text" and block.get("content", "").strip():
+                        send_message(block["content"])
+                        time.sleep(0.3)
+                    elif block.get("type") == "image":
+                        send_image(block["path"])
+                        time.sleep(0.5)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
                 self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
             except NoChatWindowError as e:
@@ -660,10 +691,16 @@ class DaxiangSenderApp:
                 self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
                 self.root.after(0, lambda: self.status_label.configure(text="未选中聊天窗口"))
+            except FileNotFoundError as e:
+                msg = str(e)
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
+                self.root.after(0, lambda: self.status_label.configure(text="❌ 图片文件不存在"))
             except Exception:
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
                 self.root.after(0, lambda: self.status_label.configure(text="❌ 发送失败"))
             self.root.after(3000, self._check_status)
+
         threading.Thread(target=send_task, daemon=True).start()
 
     def _read_chat(self):
