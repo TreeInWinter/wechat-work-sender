@@ -13,6 +13,7 @@
 - 终端/Python 已在「系统设置 → 隐私与安全性 → 辅助功能」中获得授权
 """
 
+import os
 import sys
 import time
 import subprocess
@@ -22,6 +23,7 @@ from collections import deque
 from AppKit import (
     NSPasteboard, NSStringPboardType, NSPasteboardTypeString,
     NSWorkspace, NSApplicationActivateIgnoringOtherApps,
+    NSImage,
 )
 from ApplicationServices import (
     AXUIElementCreateApplication,
@@ -321,6 +323,40 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
         set_clipboard(original_clipboard)
 
     print(f"[成功] 消息已发送: {text[:50]}{'...' if len(text) > 50 else ''}")
+    return True
+
+
+def send_image(path: str) -> bool:
+    """向企业微信当前聊天窗口发送一张图片。"""
+    expanded = os.path.expanduser(path)
+    if not os.path.exists(expanded):
+        raise FileNotFoundError(f"图片不存在: {expanded}")
+
+    if not is_daxiang_running():
+        print("[错误] 企业微信未运行")
+        return False
+
+    if not activate_daxiang():
+        return False
+
+    if not focus_chat_input():
+        raise NoChatWindowError("请先在企业微信中选中聊天窗口")
+
+    image = NSImage.alloc().initWithContentsOfFile_(expanded)
+    if image is None:
+        raise ValueError(f"无法加载图片: {expanded}")
+
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    pb.writeObjects_([image])
+
+    time.sleep(0.1)
+    paste()
+    time.sleep(0.5)
+    press_enter()
+    time.sleep(0.2)
+
+    print(f"[成功] 图片已发送: {os.path.basename(expanded)}")
     return True
 
 
