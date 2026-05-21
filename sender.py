@@ -267,7 +267,9 @@ def press_enter():
     """用 AppleScript 发送 Return 键，对 Electron 类应用（如企业微信）更可靠"""
     script = '''
     tell application "System Events"
-        keystroke return
+        tell process "企业微信"
+            key code 36
+        end tell
     end tell
     '''
     subprocess.run(["osascript", "-e", script], capture_output=True)
@@ -469,9 +471,8 @@ def send_blocks(blocks: list) -> bool:
                 press_shift_enter()   # 图片后换行
                 time.sleep(0.05)
 
-        # 所有内容就位，重新聚焦确保 Enter 落到输入框，再发送
-        focus_chat_input()
-        time.sleep(0.2)
+        # 所有内容就位，等待 UI 稳定后发送
+        time.sleep(0.5)
         press_enter()
 
     finally:
