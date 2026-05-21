@@ -144,6 +144,179 @@ def has_images(phrase) -> bool:
 
 
 # ============================================================
+# 块编辑器
+# ============================================================
+
+class BlockEditor(ctk.CTkToplevel):
+    """话术块编辑器：支持文字块和图片块的混排编辑。"""
+
+    def __init__(self, parent, initial_phrase=None):
+        super().__init__(parent)
+        self.title("编辑话术")
+        self.geometry("480x420")
+        self.attributes("-topmost", True)
+        self.resizable(True, True)
+        self._result = None
+        self._text_widgets: dict = {}
+
+        if initial_phrase is None:
+            self.blocks = [{"type": "text", "content": ""}]
+        elif isinstance(initial_phrase, str):
+            self.blocks = [{"type": "text", "content": initial_phrase}]
+        else:
+            self.blocks = copy.deepcopy(initial_phrase)
+
+        self._build()
+        self.grab_set()
+
+    def _build(self):
+        self.blocks_frame = ctk.CTkScrollableFrame(
+            self, fg_color="transparent", corner_radius=0
+        )
+        self.blocks_frame.pack(fill="both", expand=True, padx=10, pady=(10, 0))
+
+        toolbar = ctk.CTkFrame(self, fg_color="transparent", height=48)
+        toolbar.pack(fill="x", padx=10, pady=8)
+        toolbar.pack_propagate(False)
+
+        ctk.CTkButton(
+            toolbar, text="＋文字", width=80, height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color=PRIMARY,
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=12),
+            command=self._add_text_block,
+        ).pack(side="left", padx=(0, 4))
+
+        ctk.CTkButton(
+            toolbar, text="＋图片", width=80, height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color=PRIMARY,
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=12),
+            command=self._add_image_block,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            toolbar, text="取消", width=64, height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666",
+            command=self.destroy,
+        ).pack(side="right", padx=(4, 0))
+
+        ctk.CTkButton(
+            toolbar, text="确认", width=64, height=32, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H, text_color="white",
+            command=self._confirm,
+        ).pack(side="right")
+
+        self._refresh_blocks()
+
+    def _refresh_blocks(self):
+        self._sync_text_widgets()
+        for w in self.blocks_frame.winfo_children():
+            w.destroy()
+        self._text_widgets = {}
+        for i, block in enumerate(self.blocks):
+            self._render_block(i, block)
+
+    def _render_block(self, i: int, block: dict):
+        row = ctk.CTkFrame(self.blocks_frame, fg_color="#f8f8f8", corner_radius=8)
+        row.pack(fill="x", pady=(0, 6))
+
+        ctrl = ctk.CTkFrame(row, fg_color="transparent", width=76)
+        ctrl.pack(side="right", padx=4, pady=4)
+        ctrl.pack_propagate(False)
+
+        ctk.CTkButton(
+            ctrl, text="🗑", width=28, height=26, corner_radius=6,
+            fg_color="transparent", text_color="#ff4d4f",
+            command=lambda idx=i: self._delete_block(idx),
+        ).pack(pady=(0, 2))
+        if i > 0:
+            ctk.CTkButton(
+                ctrl, text="↑", width=28, height=26, corner_radius=6,
+                fg_color="transparent", text_color="#666",
+                command=lambda idx=i: self._move_block(idx, -1),
+            ).pack(pady=1)
+        if i < len(self.blocks) - 1:
+            ctk.CTkButton(
+                ctrl, text="↓", width=28, height=26, corner_radius=6,
+                fg_color="transparent", text_color="#666",
+                command=lambda idx=i: self._move_block(idx, 1),
+            ).pack(pady=1)
+
+        if block["type"] == "text":
+            tb = ctk.CTkTextbox(
+                row, height=80, corner_radius=6,
+                font=ctk.CTkFont(family="PingFang SC", size=12),
+                border_width=1, border_color="#e0e0e0",
+            )
+            tb.pack(fill="x", padx=(8, 4), pady=8)
+            tb.insert("end", block.get("content", ""))
+            self._text_widgets[i] = tb
+        elif block["type"] == "image":
+            name = os.path.basename(block.get("path", "")) or "（未选择）"
+            ctk.CTkLabel(
+                row, text=f"🖼  {name}", anchor="w",
+                font=ctk.CTkFont(family="PingFang SC", size=12),
+                text_color="#555",
+            ).pack(fill="x", padx=(10, 4), pady=12)
+
+    def _sync_text_widgets(self):
+        for i, tb in self._text_widgets.items():
+            if i < len(self.blocks) and self.blocks[i]["type"] == "text":
+                try:
+                    self.blocks[i]["content"] = tb.get("1.0", "end").strip()
+                except Exception:
+                    pass
+
+    def _add_text_block(self):
+        self._sync_text_widgets()
+        self.blocks.append({"type": "text", "content": ""})
+        self._refresh_blocks()
+
+    def _add_image_block(self):
+        from tkinter import filedialog
+        self._sync_text_widgets()
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="选择图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.gif *.webp"), ("所有文件", "*.*")],
+        )
+        if path:
+            self.blocks.append({"type": "image", "path": path})
+            self._refresh_blocks()
+
+    def _delete_block(self, i: int):
+        self._sync_text_widgets()
+        self.blocks.pop(i)
+        self._refresh_blocks()
+
+    def _move_block(self, i: int, direction: int):
+        self._sync_text_widgets()
+        j = i + direction
+        if 0 <= j < len(self.blocks):
+            self.blocks[i], self.blocks[j] = self.blocks[j], self.blocks[i]
+        self._refresh_blocks()
+
+    def _confirm(self):
+        self._sync_text_widgets()
+        result = [
+            b for b in self.blocks
+            if (b["type"] == "text" and b.get("content", "").strip())
+            or b["type"] == "image"
+        ]
+        if not result:
+            return
+        self._result = result
+        self.destroy()
+
+    def get_result(self):
+        """等待对话框关闭，返回 blocks 列表或 None（取消时）。"""
+        self.wait_window()
+        return self._result
+
+
+# ============================================================
 # 话术卡片组件
 # ============================================================
 
