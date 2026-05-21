@@ -11,6 +11,8 @@ import json
 import os
 import subprocess
 import threading
+import re
+import copy
 
 import customtkinter as ctk
 from tkinter import messagebox, simpledialog
@@ -111,6 +113,34 @@ def save_phrases(phrases: dict):
     """保存话术库"""
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(phrases, f, ensure_ascii=False, indent=2)
+
+
+def normalize_phrase(phrase) -> list:
+    """将话术值统一转换为 Block 列表（兼容旧纯字符串）。
+    str  → [{"type": "text", "content": str}]
+    list → list (原样返回)
+    """
+    if isinstance(phrase, str):
+        return [{"type": "text", "content": phrase}]
+    return list(phrase)
+
+
+def phrase_preview_text(phrase) -> str:
+    """返回用于卡片展示的纯文本摘要（去换行，图片块替换为 🖼）。"""
+    parts = []
+    for block in normalize_phrase(phrase):
+        if block.get("type") == "text" and block.get("content", "").strip():
+            parts.append(block["content"].replace("\n", " ").strip())
+        elif block.get("type") == "image":
+            parts.append("🖼")
+    return "  ".join(p for p in parts if p)
+
+
+def has_images(phrase) -> bool:
+    """话术中是否含有图片块。"""
+    if isinstance(phrase, str):
+        return False
+    return any(b.get("type") == "image" for b in phrase)
 
 
 # ============================================================
