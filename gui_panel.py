@@ -146,18 +146,22 @@ def has_images(phrase) -> bool:
 def make_thumbnail(path: str, size: tuple = (72, 54)):
     """用 Pillow 生成 CTkImage 缩略图。加载失败返回 None。"""
     try:
+        if not path or not isinstance(path, str):
+            return None
         from PIL import Image as PILImage
         expanded = os.path.expanduser(path)
-        img = PILImage.open(expanded).convert("RGBA")
+        if not os.path.exists(expanded):
+            return None
+        img = PILImage.open(expanded)
         img.thumbnail((size[0] * 3, size[1] * 3), PILImage.LANCZOS)
-        # 居中裁剪到目标尺寸
         w, h = img.size
         tw, th = size
-        left = (w - tw) // 2 if w > tw else 0
-        top  = (h - th) // 2 if h > th else 0
+        left = max(0, (w - tw) // 2)
+        top  = max(0, (h - th) // 2)
         img = img.crop((left, top, left + min(w, tw), top + min(h, th)))
         new = PILImage.new("RGBA", size, (240, 244, 255, 255))
-        new.paste(img, ((tw - min(w, tw)) // 2, (th - min(h, th)) // 2))
+        img_rgba = img.convert("RGBA") if img.mode != "RGBA" else img
+        new.paste(img_rgba, ((tw - img_rgba.width) // 2, (th - img_rgba.height) // 2))
         return ctk.CTkImage(light_image=new, dark_image=new, size=size)
     except Exception:
         return None
