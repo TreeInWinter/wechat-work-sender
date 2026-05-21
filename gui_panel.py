@@ -118,11 +118,13 @@ def save_phrases(phrases: dict):
 def normalize_phrase(phrase) -> list:
     """将话术值统一转换为 Block 列表（兼容旧纯字符串）。
     str  → [{"type": "text", "content": str}]
-    list → list (原样返回)
+    list → list (原样返回，跳过非 dict 项)
     """
+    if phrase is None:
+        return []
     if isinstance(phrase, str):
         return [{"type": "text", "content": phrase}]
-    return list(phrase)
+    return [b for b in phrase if isinstance(b, dict)]
 
 
 def phrase_preview_text(phrase) -> str:
@@ -138,9 +140,7 @@ def phrase_preview_text(phrase) -> str:
 
 def has_images(phrase) -> bool:
     """话术中是否含有图片块。"""
-    if isinstance(phrase, str):
-        return False
-    return any(b.get("type") == "image" for b in phrase)
+    return any(b.get("type") == "image" for b in normalize_phrase(phrase))
 
 
 # ============================================================
