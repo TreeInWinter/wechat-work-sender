@@ -6,6 +6,11 @@ DMG_FILENAME="wechat-sender"
 DIST_DIR="dist"
 VENV=".venv/bin"
 
+if [ ! -d ".venv" ]; then
+    echo "❌ .venv 不存在，请先运行：python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+    exit 1
+fi
+
 echo "==> 安装打包依赖..."
 "$VENV/pip" install pyinstaller pyinstaller-hooks-contrib --quiet
 
