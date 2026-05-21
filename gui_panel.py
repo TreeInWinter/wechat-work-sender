@@ -409,6 +409,7 @@ class BlockEditor(ctk.CTkToplevel):
         if self._active_idx != idx:
             self._active_idx = idx
             self._render_all()
+            self.after(50, self._focus_active_textbox)  # 重建后恢复焦点
 
     def _on_focus_out(self, idx: int, tb: ctk.CTkTextbox):
         if idx < len(self.blocks) and self.blocks[idx]["type"] == "text":
