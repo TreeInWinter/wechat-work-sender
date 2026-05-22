@@ -13,6 +13,7 @@
 - 终端/Python 已在「系统设置 → 隐私与安全性 → 辅助功能」中获得授权
 """
 
+import os
 import sys
 import time
 import subprocess
@@ -22,6 +23,7 @@ from collections import deque
 from AppKit import (
     NSPasteboard, NSStringPboardType, NSPasteboardTypeString,
     NSWorkspace, NSApplicationActivateIgnoringOtherApps,
+    NSImage, NSBitmapImageRep,
 )
 from ApplicationServices import (
     AXUIElementCreateApplication,
@@ -42,6 +44,11 @@ from Quartz import (
     kCGHIDEventTap,
     kCGEventKeyDown,
     kCGEventKeyUp,
+    CGEventCreateMouseEvent,
+    kCGEventLeftMouseDown,
+    kCGEventLeftMouseUp,
+    kCGMouseButtonLeft,
+    CGPointMake,
 )
 
 
@@ -265,7 +272,124 @@ def press_enter():
     """用 AppleScript 发送 Return 键，对 Electron 类应用（如企业微信）更可靠"""
     script = '''
     tell application "System Events"
-        keystroke return
+        tell process "企业微信"
+            key code 36
+        end tell
+    end tell
+    '''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+def press_shift_enter():
+    """用 AppleScript 发送 Shift+Return，在输入框内换行（不发送消息）"""
+    script = '''
+    tell application "System Events"
+        keystroke return using {shift down}
+    end tell
+    '''
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+def _mouse_click(x: float, y: float):
+    """在屏幕坐标 (x, y) 处模拟鼠标左键单击。"""
+    pos = CGPointMake(x, y)
+    down = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, pos, kCGMouseButtonLeft)
+    up   = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp,   pos, kCGMouseButtonLeft)
+    CGEventPost(kCGHIDEventTap, down)
+    time.sleep(0.05)
+    CGEventPost(kCGHIDEventTap, up)
+    time.sleep(0.05)
+
+
+def click_send_button() -> bool:
+    """在企业微信聊天输入区找到发送按钮并点击。
+    优先用 AX AXPress；失败则用鼠标点击按钮中心。
+    """
+    from ApplicationServices import (
+        AXUIElementCopyAttributeValue, kAXWindowsAttribute,
+        kAXRoleAttribute, kAXChildrenAttribute,
+        kAXPositionAttribute, kAXSizeAttribute,
+        AXUIElementPerformAction, AXUIElementCopyActionNames,
+        AXValueGetValue, kAXValueCGPointType, kAXValueCGSizeType,
+        kAXPressAction,
+    )
+    from collections import deque
+
+    ax = _get_ax_app()
+    if ax is None:
+        return False
+    try:
+        _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+        if not windows:
+            return False
+
+        win = windows[0]
+        # 获取窗口底部坐标
+        _, wpos_ref = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
+        _, wsz_ref  = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
+        _, wpt = AXValueGetValue(wpos_ref, kAXValueCGPointType, None)
+        _, wsz = AXValueGetValue(wsz_ref,  kAXValueCGSizeType,  None)
+        win_bottom = wpt.y + wsz.height
+
+        # BFS 找最靠近窗口底部右侧的 AXButton（即发送按钮）
+        queue = deque([(win, 0)])
+        best = None   # (y_distance_to_bottom, x_right, element, cx, cy)
+        while queue:
+            el, d = queue.popleft()
+            if d > 12:
+                continue
+            try:
+                _, role = AXUIElementCopyAttributeValue(el, kAXRoleAttribute, None)
+                if role == "AXButton":
+                    _, pr = AXUIElementCopyAttributeValue(el, kAXPositionAttribute, None)
+                    _, sr = AXUIElementCopyAttributeValue(el, kAXSizeAttribute, None)
+                    if pr and sr:
+                        _, pt = AXValueGetValue(pr, kAXValueCGPointType, None)
+                        _, sz = AXValueGetValue(sr, kAXValueCGSizeType,  None)
+                        if pt and sz and sz.width >= 50:   # 排除小图标按钮
+                            dist = win_bottom - (pt.y + sz.height)
+                            cx = pt.x + sz.width / 2
+                            cy = pt.y + sz.height / 2
+                            if best is None or dist < best[0] or (dist == best[0] and cx > best[1]):
+                                best = (dist, cx, el, cx, cy)
+                _, ch = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, None)
+                if ch:
+                    for c in ch:
+                        queue.append((c, d + 1))
+            except Exception:
+                pass
+
+        if best is None:
+            return False
+
+        _, _, btn, cx, cy = best
+        # 先尝试 AX Press
+        try:
+            _, actions = AXUIElementCopyActionNames(btn)
+            if actions and kAXPressAction in actions:
+                AXUIElementPerformAction(btn, kAXPressAction)
+                return True
+        except Exception:
+            pass
+
+        # AX Press 不可用时，用鼠标点击
+        _mouse_click(cx, cy)
+        return True
+
+    except Exception:
+        return False
+
+
+def type_text(text: str):
+    """用 AppleScript keystroke 直接模拟键盘输入，支持中文 Unicode。
+
+    比剪贴板粘贴（Cmd+V）更接近用户手动输入：企业微信会将其保留在
+    输入框 buffer 中，后续粘贴图片后 Enter 可将两者作为一条消息发出。
+    """
+    escaped = text.replace('\\', '\\\\').replace('"', '\\"')
+    script = f'''
+    tell application "System Events"
+        keystroke "{escaped}"
     end tell
     '''
     subprocess.run(["osascript", "-e", script], capture_output=True)
@@ -321,6 +445,96 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
         set_clipboard(original_clipboard)
 
     print(f"[成功] 消息已发送: {text[:50]}{'...' if len(text) > 50 else ''}")
+    return True
+
+
+def send_image(path: str, auto_activate: bool = True) -> bool:
+    """向企业微信当前聊天窗口发送一张图片。
+
+    参数：
+        path: 图片文件路径（支持 ~ 展开）
+        auto_activate: 是否重新激活企业微信窗口。顺序发送时传 False，
+                       避免重复激活打断当前输入框焦点。
+    """
+    expanded = os.path.expanduser(path)
+    if not os.path.exists(expanded):
+        raise FileNotFoundError(f"图片不存在: {expanded}")
+
+    if not is_daxiang_running():
+        print("[错误] 企业微信未运行")
+        return False
+
+    if auto_activate:
+        if not activate_daxiang():
+            return False
+
+    if not focus_chat_input():
+        raise NoChatWindowError("请先在企业微信中选中聊天窗口")
+
+    image = NSImage.alloc().initWithContentsOfFile_(expanded)
+    if image is None:
+        raise ValueError(f"无法加载图片: {expanded}")
+
+    original_text = get_clipboard()   # 保存原文字剪贴板
+
+    # 企业微信（Electron/Chromium）需要 public.png 格式，纯 TIFF 不被识别
+    # 与 macOS 截图工具写入格式保持一致
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    tiff_data = image.TIFFRepresentation()
+    bitmap = NSBitmapImageRep.imageRepWithData_(tiff_data)
+    png_data = bitmap.representationUsingType_properties_(4, None)  # 4 = NSPNGFileType
+    if png_data:
+        pb.setData_forType_(png_data, "public.png")
+    else:
+        pb.writeObjects_([image])   # 兜底：写 TIFF
+
+    time.sleep(0.1)
+    paste()
+    time.sleep(0.5)
+    press_enter()
+    time.sleep(0.2)
+
+    # 恢复文字剪贴板（图片数据无法恢复，只恢复文字内容）
+    if original_text:
+        set_clipboard(original_text)
+
+    print(f"[成功] 图片已发送: {os.path.basename(expanded)}")
+    return True
+
+
+def send_blocks(blocks: list) -> bool:
+    """依次发送图文混排的各个 block。
+
+    每个 block 独立发送：
+    - text  → send_message()（剪贴板粘贴 + Enter，已验证可靠）
+    - image → send_image()（PNG 格式剪贴板 + Enter，已验证可靠）
+
+    第一个 block 正常激活企业微信，后续 block 跳过重复激活。
+    """
+    if not blocks:
+        return True
+
+    first = True
+    for block in blocks:
+        btype = block.get("type")
+
+        if btype == "text":
+            content = block.get("content", "").strip()
+            if not content:
+                continue
+            send_message(content, auto_activate=first)
+            first = False
+            time.sleep(0.3)
+
+        elif btype == "image":
+            path = block.get("path", "")
+            if not path:
+                continue
+            send_image(path, auto_activate=first)
+            first = False
+            time.sleep(0.3)
+
     return True
 
 

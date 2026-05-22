@@ -11,6 +11,8 @@ import json
 import os
 import subprocess
 import threading
+import re
+import copy
 
 import customtkinter as ctk
 from tkinter import messagebox, simpledialog
@@ -26,7 +28,7 @@ from ApplicationServices import (
     kAXValueCGSizeType,
 )
 
-from sender import send_message, is_daxiang_running, NoChatWindowError, read_chat_messages
+from sender import send_message, send_image, send_blocks, is_daxiang_running, NoChatWindowError, read_chat_messages
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -113,6 +115,374 @@ def save_phrases(phrases: dict):
         json.dump(phrases, f, ensure_ascii=False, indent=2)
 
 
+def normalize_phrase(phrase) -> list:
+    """将话术值统一转换为 Block 列表（兼容旧纯字符串）。
+    str  → [{"type": "text", "content": str}]
+    list → list (原样返回，跳过非 dict 项)
+    """
+    if phrase is None:
+        return []
+    if isinstance(phrase, str):
+        return [{"type": "text", "content": phrase}]
+    return [b for b in phrase if isinstance(b, dict)]
+
+
+def phrase_preview_text(phrase) -> str:
+    """返回用于卡片展示的纯文本摘要（去换行，图片块替换为 🖼）。"""
+    parts = []
+    for block in normalize_phrase(phrase):
+        if block.get("type") == "text" and block.get("content", "").strip():
+            parts.append(block["content"].replace("\n", " ").strip())
+        elif block.get("type") == "image":
+            parts.append("🖼")
+    return "  ".join(p for p in parts if p)
+
+
+def has_images(phrase) -> bool:
+    """话术中是否含有图片块。"""
+    return any(b.get("type") == "image" for b in normalize_phrase(phrase))
+
+
+def make_thumbnail(path: str, size: tuple = (72, 54)):
+    """用 Pillow 生成 CTkImage 缩略图。加载失败返回 None。"""
+    try:
+        if not path or not isinstance(path, str):
+            return None
+        from PIL import Image as PILImage
+        expanded = os.path.expanduser(path)
+        if not os.path.exists(expanded):
+            return None
+        img = PILImage.open(expanded)
+        img.thumbnail((size[0] * 3, size[1] * 3), PILImage.LANCZOS)
+        w, h = img.size
+        tw, th = size
+        left = max(0, (w - tw) // 2)
+        top  = max(0, (h - th) // 2)
+        img = img.crop((left, top, left + min(w, tw), top + min(h, th)))
+        new = PILImage.new("RGBA", size, (240, 244, 255, 255))
+        img_rgba = img.convert("RGBA") if img.mode != "RGBA" else img
+        new.paste(img_rgba, ((tw - img_rgba.width) // 2, (th - img_rgba.height) // 2))
+        return ctk.CTkImage(light_image=new, dark_image=new, size=size)
+    except Exception:
+        return None
+
+
+# ============================================================
+# 块编辑器
+# ============================================================
+
+class BlockEditor(ctk.CTkToplevel):
+    """WYSIWYG 内联画布话术编辑器：文字块直接编辑，图片块显示缩略图。"""
+
+    TEXT_LABEL_BG     = "#e6f0ff"
+    IMAGE_LABEL_BG    = "#fff8f0"
+    INACTIVE_LABEL_BG = "#f8f8f8"
+
+    def __init__(self, parent, initial_phrase=None):
+        super().__init__(parent)
+        self.title("编辑话术")
+        self.geometry("520x500")
+        self.attributes("-topmost", True)
+        self.resizable(True, True)
+        self._result      = None
+        self._active_idx  = 0
+        self._text_widgets: dict = {}   # {block_index: CTkTextbox}
+
+        if initial_phrase is None:
+            self.blocks = [{"type": "text", "content": ""}]
+        elif isinstance(initial_phrase, str):
+            self.blocks = [{"type": "text", "content": initial_phrase}]
+        else:
+            self.blocks = copy.deepcopy(initial_phrase)
+
+        self._build()
+        self.grab_set()
+        self.after(120, self._focus_active_textbox)
+
+    # ── 构建固定框架 ─────────────────────────────────────────
+
+    def _build(self):
+        # 标题栏
+        header = ctk.CTkFrame(self, height=44, corner_radius=0, fg_color=PRIMARY)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+
+        ctk.CTkLabel(
+            header, text="编辑话术", text_color="white",
+            font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
+        ).pack(side="left", padx=12)
+
+        ctk.CTkButton(
+            header, text="确认", width=60, height=28, corner_radius=6,
+            fg_color="white", text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._confirm,
+        ).pack(side="right", padx=(4, 10))
+
+        ctk.CTkButton(
+            header, text="取消", width=60, height=28, corner_radius=6,
+            fg_color="transparent", text_color="white", hover_color=PRIMARY_H,
+            border_width=1, border_color="#4a9eff",
+            font=ctk.CTkFont(size=12),
+            command=self.destroy,
+        ).pack(side="right")
+
+        # 可滚动画布
+        self._canvas = ctk.CTkScrollableFrame(
+            self, fg_color="#f5f7ff", corner_radius=0
+        )
+        self._canvas.pack(fill="both", expand=True)
+
+        # 底部添加按钮栏
+        add_bar = ctk.CTkFrame(self, fg_color="white", height=52, corner_radius=0)
+        add_bar.pack(fill="x")
+        add_bar.pack_propagate(False)
+
+        inner = ctk.CTkFrame(add_bar, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=12, pady=8)
+        inner.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkButton(
+            inner, text="＋ 添加文字", height=34, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#bbd6ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=11),
+            command=self._add_text,
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        ctk.CTkButton(
+            inner, text="＋ 添加图片", height=34, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#ffd591",
+            text_color="#fa8c16", hover_color="#fff8f0",
+            font=ctk.CTkFont(size=11),
+            command=self._add_image,
+        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        self._render_all()
+
+    # ── 渲染 ─────────────────────────────────────────────────
+
+    def _render_all(self):
+        self._sync_all_texts()
+        for w in self._canvas.winfo_children():
+            w.destroy()
+        self._text_widgets = {}
+        for i, block in enumerate(self.blocks):
+            self._render_block(i, block)
+
+    def _render_block(self, i: int, block: dict):
+        active  = (i == self._active_idx)
+        b_color = PRIMARY if active else "#e8e8e8"
+        b_width = 2 if active else 1
+
+        outer = ctk.CTkFrame(
+            self._canvas, corner_radius=10, fg_color="white",
+            border_color=b_color, border_width=b_width,
+        )
+        outer.pack(fill="x", padx=12, pady=(0, 7))
+
+        # 标签条
+        if block["type"] == "text":
+            lbg    = self.TEXT_LABEL_BG if active else self.INACTIVE_LABEL_BG
+            lcolor = PRIMARY if active else "#999"
+            ltxt   = "文字"
+        else:
+            lbg    = self.IMAGE_LABEL_BG
+            lcolor = "#fa8c16"
+            ltxt   = "图片"
+
+        label_bar = ctk.CTkFrame(outer, fg_color=lbg, corner_radius=0, height=24)
+        label_bar.pack(fill="x")
+        label_bar.pack_propagate(False)
+
+        ctk.CTkLabel(
+            label_bar, text=ltxt, text_color=lcolor,
+            font=ctk.CTkFont(size=9, weight="bold"),
+        ).pack(side="left", padx=8)
+
+        # 控制按钮
+        btn_area = ctk.CTkFrame(label_bar, fg_color="transparent")
+        btn_area.pack(side="right", padx=4)
+
+        if i > 0:
+            ctk.CTkButton(
+                btn_area, text="↑", width=20, height=18, corner_radius=4,
+                fg_color="transparent", text_color="#aaa", hover_color="#f0f0f0",
+                font=ctk.CTkFont(size=11),
+                command=lambda idx=i: self._move(idx, -1),
+            ).pack(side="left", padx=1)
+
+        if i < len(self.blocks) - 1:
+            ctk.CTkButton(
+                btn_area, text="↓", width=20, height=18, corner_radius=4,
+                fg_color="transparent", text_color="#aaa", hover_color="#f0f0f0",
+                font=ctk.CTkFont(size=11),
+                command=lambda idx=i: self._move(idx, 1),
+            ).pack(side="left", padx=1)
+
+        ctk.CTkButton(
+            btn_area, text="🗑", width=20, height=18, corner_radius=4,
+            fg_color="transparent", text_color="#ff4d4f", hover_color="#fff0f0",
+            font=ctk.CTkFont(size=11),
+            command=lambda idx=i: self._delete(idx),
+        ).pack(side="left", padx=(1, 4))
+
+        # 内容区
+        if block["type"] == "text":
+            tb = ctk.CTkTextbox(
+                outer, height=72, corner_radius=0, border_width=0,
+                font=ctk.CTkFont(family="PingFang SC", size=12),
+            )
+            tb.pack(fill="x", padx=10, pady=(6, 10))
+            tb.insert("end", block.get("content", ""))
+            tb.bind("<FocusIn>",  lambda e, idx=i: self._on_focus_in(idx))
+            tb.bind("<FocusOut>", lambda e, idx=i, w=tb: self._on_focus_out(idx, w))
+            self._text_widgets[i] = tb
+        else:
+            self._render_image_content(outer, i, block)
+
+    def _render_image_content(self, parent, i: int, block: dict):
+        path = block.get("path", "")
+        row  = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=8)
+
+        # 缩略图
+        thumb = make_thumbnail(path) if path else None
+        if thumb:
+            ctk.CTkLabel(row, image=thumb, text="", width=72, height=54).pack(
+                side="left", padx=(0, 10)
+            )
+        else:
+            ctk.CTkLabel(
+                row, text="🖼", font=ctk.CTkFont(size=24),
+                width=72, height=54, fg_color="#e0eeff", corner_radius=6,
+                text_color="#7ba8e0",
+            ).pack(side="left", padx=(0, 10))
+
+        # 信息列
+        info = ctk.CTkFrame(row, fg_color="transparent")
+        info.pack(side="left", fill="x", expand=True)
+
+        name = os.path.basename(path) if path else "（未选择）"
+        ctk.CTkLabel(
+            info, text=name, anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=11, weight="bold"),
+            text_color="#333",
+        ).pack(anchor="w")
+
+        expanded = os.path.expanduser(path) if path else ""
+        if expanded and os.path.exists(expanded):
+            try:
+                sz = os.path.getsize(expanded)
+                size_str = f"{sz // 1024} KB" if sz >= 1024 else f"{sz} B"
+                ctk.CTkLabel(
+                    info, text=size_str, anchor="w",
+                    font=ctk.CTkFont(size=10), text_color="#999",
+                ).pack(anchor="w")
+            except Exception:
+                pass
+
+        ctk.CTkButton(
+            info, text="替换图片", width=60, height=20, corner_radius=4,
+            fg_color="transparent", text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=10),
+            command=lambda idx=i: self._replace_image(idx),
+        ).pack(anchor="w", pady=(4, 0))
+
+    # ── 事件处理 ─────────────────────────────────────────────
+
+    def _focus_active_textbox(self):
+        tb = self._text_widgets.get(self._active_idx)
+        if tb:
+            tb.focus_set()
+
+    def _sync_all_texts(self):
+        """将所有 CTkTextbox 内容同步回 self.blocks。"""
+        for i, tb in self._text_widgets.items():
+            if i < len(self.blocks) and self.blocks[i]["type"] == "text":
+                try:
+                    self.blocks[i]["content"] = tb.get("1.0", "end").strip()
+                except Exception:
+                    pass
+
+    def _on_focus_in(self, idx: int):
+        if self._active_idx != idx:
+            self._active_idx = idx
+            self._render_all()
+            self.after(50, self._focus_active_textbox)  # 重建后恢复焦点
+
+    def _on_focus_out(self, idx: int, tb: ctk.CTkTextbox):
+        if idx < len(self.blocks) and self.blocks[idx]["type"] == "text":
+            try:
+                self.blocks[idx]["content"] = tb.get("1.0", "end").strip()
+            except Exception:
+                pass
+
+    def _move(self, i: int, direction: int):
+        self._sync_all_texts()
+        j = i + direction
+        if 0 <= j < len(self.blocks):
+            self.blocks[i], self.blocks[j] = self.blocks[j], self.blocks[i]
+            self._active_idx = j
+        self._render_all()
+
+    def _delete(self, i: int):
+        self._sync_all_texts()
+        self.blocks.pop(i)
+        self._active_idx = min(self._active_idx, max(0, len(self.blocks) - 1))
+        self._render_all()
+
+    def _add_text(self):
+        self._sync_all_texts()
+        self.blocks.append({"type": "text", "content": ""})
+        self._active_idx = len(self.blocks) - 1
+        self._render_all()
+        self.after(80, self._focus_active_textbox)
+
+    def _add_image(self):
+        from tkinter import filedialog
+        self._sync_all_texts()
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="选择图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.gif *.webp"), ("所有文件", "*.*")],
+        )
+        if path:
+            self.blocks.append({"type": "image", "path": path})
+            self._active_idx = len(self.blocks) - 1
+            self._render_all()
+
+    def _replace_image(self, i: int):
+        from tkinter import filedialog
+        self._sync_all_texts()
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="替换图片",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.gif *.webp"), ("所有文件", "*.*")],
+        )
+        if path:
+            self.blocks[i]["path"] = path
+            self._active_idx = i
+            self._render_all()
+
+    def _confirm(self):
+        self._sync_all_texts()
+        result = [
+            b for b in self.blocks
+            if (b["type"] == "text" and b.get("content", "").strip())
+            or b["type"] == "image"
+        ]
+        if not result:
+            return
+        self._result = result
+        self.destroy()
+
+    def get_result(self):
+        """等待对话框关闭，返回 blocks 列表或 None（取消时）。"""
+        self.wait_window()
+        return self._result
+
+
 # ============================================================
 # 话术卡片组件
 # ============================================================
@@ -124,41 +494,66 @@ class PhraseCard(ctk.CTkFrame):
     SELECTED_BG    = "#e6f0ff"
     SELECTED_BORDER = "#bbd6ff"
 
-    def __init__(self, parent, text: str, on_send, on_select, **kwargs):
+    def __init__(self, parent, phrase, on_send, on_select, on_edit=None, **kwargs):
         super().__init__(parent, corner_radius=10, fg_color=self.NORMAL_BG,
                          border_width=1, border_color="#e8e8e8", **kwargs)
-        self._text = text
+        self._phrase = phrase
         self._on_send = on_send
         self._on_select = on_select
+        self._on_edit = on_edit
         self._selected = False
         self._build()
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
 
+        preview = phrase_preview_text(self._phrase)
+        has_img = has_images(self._phrase)
+
         self._label = ctk.CTkLabel(
-            self, text=self._text, wraplength=240,
+            self,
+            text=("🖼 " if has_img else "") + preview,
+            wraplength=200,
             justify="left", anchor="w",
             text_color="#333",
             font=ctk.CTkFont(family="PingFang SC", size=12),
         )
-        self._label.grid(row=0, column=0, padx=(10, 6), pady=8, sticky="ew")
+        self._label.grid(row=0, column=0, padx=(10, 4), pady=8, sticky="ew")
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.grid(row=0, column=1, padx=(0, 6), pady=8)
+
+        if self._on_edit:
+            ctk.CTkButton(
+                btn_frame, text="编辑", width=36, height=22,
+                corner_radius=4, fg_color="transparent",
+                border_width=1, border_color="#d9d9d9",
+                text_color="#888", hover_color="#f0f0f0",
+                font=ctk.CTkFont(size=10),
+                command=self._on_edit,
+            ).pack(side="top", pady=(0, 3))
 
         self._send_btn = ctk.CTkButton(
-            self, text="发送", width=44, height=26,
+            btn_frame, text="发送", width=44, height=26,
             corner_radius=6, fg_color=CARD_BG,
             text_color=PRIMARY, hover_color="#bbd6ff",
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self._on_send,
         )
-        self._send_btn.grid(row=0, column=1, padx=(0, 8), pady=8)
+        self._send_btn.pack(side="top")
 
         self._label.bind("<Button-1>", lambda e: self._on_select(self))
         self.bind("<Button-1>", lambda e: self._on_select(self))
 
     @property
     def text(self) -> str:
-        return self._text
+        """纯文本摘要（向后兼容）。"""
+        return phrase_preview_text(self._phrase)
+
+    @property
+    def phrase(self):
+        """原始话术值（str 或 list of blocks）。"""
+        return self._phrase
 
     def set_selected(self, selected: bool):
         self._selected = selected
@@ -319,12 +714,13 @@ class DaxiangSenderApp:
             widget.destroy()
         self._selected_card = None
         group = self.group_var.get()
-        for phrase in self.phrases.get(group, []):
+        for i, phrase in enumerate(self.phrases.get(group, [])):
             card = PhraseCard(
                 self.cards_frame,
-                text=phrase,
+                phrase=phrase,
                 on_send=lambda p=phrase: self._do_send(p),
                 on_select=self._select_card,
+                on_edit=lambda idx=i: self._edit_phrase(idx),
             )
             card.pack(fill="x", pady=(0, 5))
 
@@ -394,12 +790,18 @@ class DaxiangSenderApp:
     # ── 话术管理 ─────────────────────────────────────────────────
 
     def _add_phrase(self):
-        text = self._ask_input("添加话术", "请输入话术内容：")
-        if text and text.strip():
-            group = self.group_var.get()
-            self.phrases.setdefault(group, []).append(text.strip())
-            save_phrases(self.phrases)
-            self._refresh_cards()
+        self.root.attributes("-topmost", False)
+        editor = BlockEditor(self.root)
+        result = editor.get_result()
+        self.root.attributes("-topmost", True)
+
+        if not result:
+            return
+        group = self.group_var.get()
+        phrase = result[0]["content"] if len(result) == 1 and result[0]["type"] == "text" else result
+        self.phrases.setdefault(group, []).append(phrase)
+        save_phrases(self.phrases)
+        self._refresh_cards()
 
     def _delete_phrase(self):
         if not self._selected_card:
@@ -407,11 +809,35 @@ class DaxiangSenderApp:
             return
         if self._ask_yesno("确认", "确定要删除这条话术吗？"):
             group = self.group_var.get()
-            phrase = self._selected_card.text
-            if phrase in self.phrases.get(group, []):
-                self.phrases[group].remove(phrase)
-                save_phrases(self.phrases)
-                self._refresh_cards()
+            target = self._selected_card.phrase
+            phrases_list = self.phrases.get(group, [])
+            for i, p in enumerate(phrases_list):
+                if p == target:
+                    phrases_list.pop(i)
+                    break
+            save_phrases(self.phrases)
+            self._refresh_cards()
+
+    def _edit_phrase(self, idx: int):
+        """打开 BlockEditor 编辑第 idx 条话术并保存。"""
+        group = self.group_var.get()
+        phrases_list = self.phrases.get(group, [])
+        if idx >= len(phrases_list):
+            return
+
+        self.root.attributes("-topmost", False)
+        editor = BlockEditor(self.root, initial_phrase=phrases_list[idx])
+        result = editor.get_result()
+        self.root.attributes("-topmost", True)
+
+        if result is None:
+            return
+        if len(result) == 1 and result[0]["type"] == "text":
+            phrases_list[idx] = result[0]["content"]
+        else:
+            phrases_list[idx] = result
+        save_phrases(self.phrases)
+        self._refresh_cards()
 
     def _send_custom(self):
         text = self.custom_input.get("1.0", "end").strip()
@@ -421,10 +847,17 @@ class DaxiangSenderApp:
         self._do_send(text)
         self.custom_input.delete("1.0", "end")
 
-    def _do_send(self, text: str):
+    def _do_send(self, phrase):
+        """发送话术（str 或 list of blocks）。
+
+        统一使用 send_blocks()：所有 block 先依次粘贴进输入框，
+        最后一次 Enter 发送，文字和图片在同一次操作中发出。
+        """
+        blocks = normalize_phrase(phrase)
+
         def send_task():
             try:
-                send_message(text)
+                send_blocks(blocks)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
                 self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
             except NoChatWindowError as e:
@@ -432,10 +865,16 @@ class DaxiangSenderApp:
                 self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
                 self.root.after(0, lambda: self.status_label.configure(text="未选中聊天窗口"))
+            except FileNotFoundError as e:
+                msg = str(e)
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
+                self.root.after(0, lambda: self.status_label.configure(text="❌ 图片文件不存在"))
             except Exception:
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
                 self.root.after(0, lambda: self.status_label.configure(text="❌ 发送失败"))
             self.root.after(3000, self._check_status)
+
         threading.Thread(target=send_task, daemon=True).start()
 
     def _read_chat(self):
