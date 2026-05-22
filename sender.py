@@ -17,6 +17,9 @@ import os
 import sys
 import time
 import subprocess
+import html
+import base64
+import tempfile
 from collections import deque
 
 # macOS 原生框架
@@ -25,6 +28,7 @@ from AppKit import (
     NSWorkspace, NSApplicationActivateIgnoringOtherApps,
     NSImage, NSBitmapImageRep,
 )
+from Foundation import NSData
 from ApplicationServices import (
     AXUIElementCreateApplication,
     AXUIElementCopyAttributeValue,
@@ -222,6 +226,16 @@ def set_clipboard(text: str):
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
     pb.setString_forType_(text, NSPasteboardTypeString)
+
+
+def set_clipboard_html(html_content: str, plain_text: str = ""):
+    """将 HTML 和纯文本 fallback 一起写入系统剪贴板。"""
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    data = html_content.encode("utf-8")
+    pb.setData_forType_(NSData.dataWithBytes_length_(data, len(data)), "public.html")
+    if plain_text:
+        pb.setString_forType_(plain_text, NSPasteboardTypeString)
 
 
 def get_clipboard() -> str:
@@ -441,8 +455,7 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
     press_enter()
 
     # Step 5: 恢复原始剪贴板
-    if original_clipboard:
-        set_clipboard(original_clipboard)
+    set_clipboard(original_clipboard)
 
     print(f"[成功] 消息已发送: {text[:50]}{'...' if len(text) > 50 else ''}")
     return True
@@ -496,11 +509,243 @@ def send_image(path: str, auto_activate: bool = True) -> bool:
     time.sleep(0.2)
 
     # 恢复文字剪贴板（图片数据无法恢复，只恢复文字内容）
-    if original_text:
-        set_clipboard(original_text)
+    set_clipboard(original_text)
 
     print(f"[成功] 图片已发送: {os.path.basename(expanded)}")
     return True
+
+
+def _blocks_plain_text(blocks: list) -> str:
+    parts = []
+    for block in blocks:
+        if block.get("type") == "text":
+            content = block.get("content", "").strip()
+            if content:
+                parts.append(content)
+        elif block.get("type") == "image":
+            path = block.get("path", "")
+            if path:
+                parts.append(f"[图片: {os.path.basename(path)}]")
+    return "\n".join(parts)
+
+
+def _image_data_uri(path: str) -> str:
+    expanded = os.path.expanduser(path)
+    ext = os.path.splitext(expanded)[1].lower()
+    mime = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(ext, "image/png")
+    with open(expanded, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def _build_html_blocks(blocks: list) -> str:
+    body = []
+    for block in blocks:
+        if block.get("type") == "text":
+            content = block.get("content", "").strip()
+            if content:
+                escaped = html.escape(content).replace("\n", "<br>")
+                body.append(f'<div style="white-space:pre-wrap">{escaped}</div>')
+        elif block.get("type") == "image":
+            path = block.get("path", "")
+            if path:
+                uri = _image_data_uri(path)
+                body.append(f'<div><img src="{uri}"></div>')
+    return (
+        '<!doctype html><html><head><meta charset="utf-8"></head>'
+        f'<body>{"".join(body)}</body></html>'
+    )
+
+
+def _validate_image_blocks(blocks: list):
+    for block in blocks:
+        if block.get("type") != "image":
+            continue
+        path = block.get("path", "")
+        expanded = os.path.expanduser(path)
+        if not os.path.exists(expanded):
+            raise FileNotFoundError(f"图片不存在: {expanded}")
+
+
+def send_blocks_html_once(blocks: list, auto_activate: bool = True) -> bool:
+    """实验路径：把 text + img(data URI) 作为 HTML 剪贴板一次性粘贴并发送。
+
+    注意：企业微信是否保留 HTML 中的图片，取决于 Electron/Web 编辑器的粘贴
+    处理和客户端协议。本函数只能完成一次性 HTML 粘贴，不能保证最终消息一定
+    以原生图文混排形式发出。
+    """
+    useful_blocks = [
+        b for b in blocks
+        if b.get("type") == "image" or (b.get("type") == "text" and b.get("content", "").strip())
+    ]
+    if not useful_blocks:
+        return True
+
+    _validate_image_blocks(useful_blocks)
+
+    if auto_activate:
+        if not activate_wx():
+            return False
+    if not focus_chat_input():
+        raise NoChatWindowError("请先在企业微信中选中聊天窗口")
+
+    original_text = get_clipboard()
+    set_clipboard_html(_build_html_blocks(useful_blocks), _blocks_plain_text(useful_blocks))
+    time.sleep(0.1)
+    paste()
+    time.sleep(0.5)
+    press_enter()
+    time.sleep(0.2)
+    set_clipboard(original_text)
+    return True
+
+
+def _load_ui_font(size: int):
+    from PIL import ImageFont
+
+    candidates = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
+
+
+def _text_width(draw, text: str, font) -> int:
+    left, _, right, _ = draw.textbbox((0, 0), text, font=font)
+    return right - left
+
+
+def _wrap_text_by_width(draw, text: str, font, max_width: int) -> list[str]:
+    lines = []
+    for paragraph in text.splitlines() or [""]:
+        current = ""
+        for char in paragraph:
+            candidate = current + char
+            if current and _text_width(draw, candidate, font) > max_width:
+                lines.append(current)
+                current = char
+            else:
+                current = candidate
+        lines.append(current)
+    return lines
+
+
+def render_blocks_to_image(blocks: list, output_path: str | None = None, max_width: int = 900) -> str:
+    """将图文 block 渲染为一张 PNG，用于单条图片消息兜底发送。"""
+    from PIL import Image, ImageDraw
+
+    useful_blocks = [
+        b for b in blocks
+        if b.get("type") == "image" or (b.get("type") == "text" and b.get("content", "").strip())
+    ]
+    if not useful_blocks:
+        raise ValueError("没有可渲染的图文内容")
+    _validate_image_blocks(useful_blocks)
+
+    padding = 28
+    gap = 18
+    text_color = (30, 35, 48)
+    bg_color = (255, 255, 255)
+    font = _load_ui_font(30)
+    line_gap = 9
+    content_width = max_width - padding * 2
+
+    probe = Image.new("RGB", (max_width, 100), bg_color)
+    draw = ImageDraw.Draw(probe)
+    rendered = []
+    total_height = padding
+
+    for block in useful_blocks:
+        if block.get("type") == "text":
+            lines = _wrap_text_by_width(draw, block.get("content", "").strip(), font, content_width)
+            line_boxes = [draw.textbbox((0, 0), line or " ", font=font) for line in lines]
+            line_heights = [box[3] - box[1] for box in line_boxes]
+            height = sum(line_heights) + line_gap * max(0, len(lines) - 1)
+            rendered.append(("text", lines, line_heights, height))
+            total_height += height + gap
+        elif block.get("type") == "image":
+            img = Image.open(os.path.expanduser(block.get("path", ""))).convert("RGBA")
+            if img.width > content_width:
+                ratio = content_width / img.width
+                img = img.resize((content_width, max(1, int(img.height * ratio))), Image.LANCZOS)
+            rendered.append(("image", img, img.height))
+            total_height += img.height + gap
+
+    total_height = max(padding * 2, total_height - gap + padding)
+    canvas = Image.new("RGB", (max_width, total_height), bg_color)
+    draw = ImageDraw.Draw(canvas)
+    y = padding
+
+    for item in rendered:
+        if item[0] == "text":
+            _, lines, line_heights, _ = item
+            for line, line_height in zip(lines, line_heights):
+                draw.text((padding, y), line, fill=text_color, font=font)
+                y += line_height + line_gap
+            y -= line_gap
+        else:
+            _, img, _ = item
+            x = padding + (content_width - img.width) // 2
+            canvas.paste(img, (x, y), img)
+            y += img.height
+        y += gap
+
+    if output_path is None:
+        fd, output_path = tempfile.mkstemp(prefix="wechat_mixed_", suffix=".png")
+        os.close(fd)
+    canvas.save(output_path, "PNG")
+    return output_path
+
+
+def send_blocks_as_image(blocks: list, auto_activate: bool = True) -> bool:
+    """可靠路径：把图文混排渲染为一张图片，再作为单条图片消息发送。"""
+    output_path = render_blocks_to_image(blocks)
+    try:
+        return send_image(output_path, auto_activate=auto_activate)
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+
+
+def send_blocks_single(blocks: list, prefer_html: bool = False) -> bool:
+    """尽量以单条消息发送图文内容。
+
+    prefer_html=True 会先尝试 HTML 剪贴板实验路径；异常时降级为合成图片。
+    默认直接使用合成图片，因为这是当前能保证"单条消息"的路径。
+    """
+    useful_blocks = [
+        b for b in blocks
+        if b.get("type") == "image" or (b.get("type") == "text" and b.get("content", "").strip())
+    ]
+    if not useful_blocks:
+        return True
+
+    has_image = any(b.get("type") == "image" for b in useful_blocks)
+    if not has_image:
+        return send_message(_blocks_plain_text(useful_blocks))
+
+    if prefer_html:
+        try:
+            return send_blocks_html_once(useful_blocks)
+        except Exception as exc:
+            print(f"[警告] HTML 图文粘贴失败，降级为合成图片: {exc}")
+
+    return send_blocks_as_image(useful_blocks)
 
 
 def send_blocks(blocks: list) -> bool:

@@ -1,4 +1,4 @@
-# 企业微信快捷发送面板 — CLAUDE.md
+# 企业微信快捷发送面板 — AGENTS.md
 
 > 此文件记录关键技术决策与背景，防止上下文压缩后遗失。每次会话结束后更新。
 
@@ -95,14 +95,19 @@ pb.writeObjects_([image])   # 只写 public.tiff，Cmd+V 无反应
 
 ---
 
-### 6. 图文混排发送：单条消息只能可靠降级为合成图片
+### 6. 图文混排发送：用 send_message + send_image 串联，不要尝试合并
 
 ```python
-# 保证只出现一条消息：把文字和图片渲染成一张 PNG，再 send_image()
-send_blocks_single(blocks)
-
-# 实验路径：一次性粘贴 public.html，成败取决于企业微信 Electron/Web 编辑器
-send_blocks_html_once(blocks)
+# 正确做法（简单可靠）
+def send_blocks(blocks):
+    first = True
+    for block in blocks:
+        if block["type"] == "text":
+            send_message(content, auto_activate=first)
+        elif block["type"] == "image":
+            send_image(path, auto_activate=first)
+        first = False
+        time.sleep(0.3)
 ```
 
 **踩坑记录（不要再尝试）**：
@@ -116,7 +121,7 @@ send_blocks_html_once(blocks)
 
 **根本原因**：企业微信的"发送"逻辑在 **WebKit 子进程**（`"企业微信"网页内容`）中。外部发给主进程的键盘 Enter 无法可靠转发到 WebKit。只有 `send_message()` 内置流程（剪贴板 Cmd+V → AppleScript Enter）才可靠。
 
-**图文混排协议限制**：企业微信 regular chat 是否支持原生单条图文混排，取决于客户端/协议，外部自动化不能保证。当前可保证的是"单条图片消息"：`send_blocks_single()` 将文字像素化并合成 PNG。若需要继续验证原生图文，使用 `send_blocks_html_once()` 做 HTML 剪贴板实验。
+**图文混排协议限制**：企业微信 regular chat 不支持单条图文混排消息，text + image 必然是两条连续消息。这是企业微信协议层设计，无法突破。
 
 ---
 
@@ -190,7 +195,7 @@ docs/
 
 4. **图片格式**：必须用 `public.png`，`writeObjects_([NSImage])` 只写 TIFF 无效。
 
-5. **图文混排 Enter 失效**：企业微信发送在 WebKit 子进程，外部键盘 Enter 不触发。要保证单条消息时用 `send_blocks_single()` 合成图片；要保留原生文字只能接受 text/image 分开发送或继续实验 HTML 剪贴板。
+5. **图文混排 Enter 失效**：企业微信发送在 WebKit 子进程，外部键盘 Enter 不触发。用 `send_message()` + `send_image()` 串联是唯一可靠方案。
 
 6. **`type_text()` 不用于发送流程**：AppleScript keystroke 打字后 Enter 无法触发 WebKit send，已在代码中保留但不在 send_blocks 中使用。
 

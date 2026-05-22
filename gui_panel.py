@@ -28,7 +28,7 @@ from ApplicationServices import (
     kAXValueCGSizeType,
 )
 
-from sender import send_message, send_image, send_blocks, is_wx_running, NoChatWindowError, read_chat_messages
+from sender import send_blocks, send_blocks_single, is_wx_running, NoChatWindowError, read_chat_messages
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -850,14 +850,16 @@ class WXSenderApp:
     def _do_send(self, phrase):
         """发送话术（str 或 list of blocks）。
 
-        统一使用 send_blocks()：所有 block 先依次粘贴进输入框，
-        最后一次 Enter 发送，文字和图片在同一次操作中发出。
+        纯文本沿用原发送链路；含图片的话术渲染为一张图片，保证只发一条消息。
         """
         blocks = normalize_phrase(phrase)
 
         def send_task():
             try:
-                send_blocks(blocks)
+                if has_images(blocks):
+                    send_blocks_single(blocks)
+                else:
+                    send_blocks(blocks)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
                 self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
             except NoChatWindowError as e:
