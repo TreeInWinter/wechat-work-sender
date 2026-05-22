@@ -61,21 +61,21 @@ class NoChatWindowError(Exception):
 # 模块一：窗口识别与激活
 # ============================================================
 
-DAXIANG_APP_NAME = "企业微信"
+WX_APP_NAME = "企业微信"
 
 
 def _get_wechat_app():
     """从 NSWorkspace 找到企业微信的 NSRunningApplication 对象"""
     apps = NSWorkspace.sharedWorkspace().runningApplications()
-    return next((a for a in apps if a.localizedName() == DAXIANG_APP_NAME), None)
+    return next((a for a in apps if a.localizedName() == WX_APP_NAME), None)
 
 
-def is_daxiang_running() -> bool:
+def is_wx_running() -> bool:
     """检查企业微信是否正在运行"""
     return _get_wechat_app() is not None
 
 
-def activate_daxiang() -> bool:
+def activate_wx() -> bool:
     """激活企业微信窗口，用 PyObjC 直接调用，无 subprocess 开销"""
     app = _get_wechat_app()
     if app is None:
@@ -422,7 +422,7 @@ def send_message(text: str, auto_activate: bool = True, delay_before_send: float
 
     # Step 1: 激活企业微信（内含运行检查）
     if auto_activate:
-        if not activate_daxiang():
+        if not activate_wx():
             return False
 
     # Step 2: 找到聊天输入框并聚焦（同时验证是否有聊天窗口）
@@ -460,12 +460,12 @@ def send_image(path: str, auto_activate: bool = True) -> bool:
     if not os.path.exists(expanded):
         raise FileNotFoundError(f"图片不存在: {expanded}")
 
-    if not is_daxiang_running():
+    if not is_wx_running():
         print("[错误] 企业微信未运行")
         return False
 
     if auto_activate:
-        if not activate_daxiang():
+        if not activate_wx():
             return False
 
     if not focus_chat_input():

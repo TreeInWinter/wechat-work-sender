@@ -28,7 +28,7 @@ from ApplicationServices import (
     kAXValueCGSizeType,
 )
 
-from sender import send_message, send_image, send_blocks, is_daxiang_running, NoChatWindowError, read_chat_messages
+from sender import send_message, send_image, send_blocks, is_wx_running, NoChatWindowError, read_chat_messages
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -573,7 +573,7 @@ class PhraseCard(ctk.CTkFrame):
 # GUI 应用
 # ============================================================
 
-class DaxiangSenderApp:
+class WXSenderApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("企业微信快捷发送")
@@ -746,7 +746,7 @@ class DaxiangSenderApp:
     def _check_status(self):
         """检查企业微信状态"""
         def check():
-            running = is_daxiang_running()
+            running = is_wx_running()
             self.root.after(0, lambda: self._update_status(running))
 
         threading.Thread(target=check, daemon=True).start()
@@ -944,5 +944,5 @@ if __name__ == "__main__":
     print("  企业微信快捷发送面板")
     print("  请确保已授予辅助功能权限")
     print("=" * 50)
-    app = DaxiangSenderApp()
+    app = WXSenderApp()
     app.run()
