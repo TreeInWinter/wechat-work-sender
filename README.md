@@ -1,4 +1,4 @@
-# 向企业微信发送消息 Demo (macOS)
+# 向企业微信发送消息 (macOS)
 
 ## 原理
 1. 通过 macOS Accessibility API 识别企业微信窗口
