@@ -13,6 +13,8 @@ import subprocess
 import threading
 import re
 import copy
+import sys
+from datetime import datetime
 
 import customtkinter as ctk
 from tkinter import messagebox, simpledialog
@@ -26,6 +28,7 @@ from ApplicationServices import (
     kAXSizeAttribute,
     kAXValueCGPointType,
     kAXValueCGSizeType,
+    AXIsProcessTrusted,
 )
 
 from sender import send_blocks, send_blocks_single, is_wx_running, NoChatWindowError, read_chat_messages
@@ -47,7 +50,16 @@ ctk.set_default_color_theme("blue")
 # ============================================================
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(SCRIPT_DIR, "phrases.json")
+APP_SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/WechatWorkSender")
+DEFAULT_DATA_FILE = os.path.join(SCRIPT_DIR, "phrases.json")
+DATA_FILE = os.path.join(APP_SUPPORT_DIR, "phrases.json") if getattr(sys, "frozen", False) else DEFAULT_DATA_FILE
+
+VARIABLE_PATTERN = re.compile(r"\{\{\s*([^{}\s]+)\s*\}\}")
+SYSTEM_VARIABLES = {
+    "日期": lambda: datetime.now().strftime("%Y-%m-%d"),
+    "时间": lambda: datetime.now().strftime("%H:%M"),
+    "星期": lambda: "一二三四五六日"[datetime.now().weekday()],
+}
 
 # 默认话术库
 DEFAULT_PHRASES = {
@@ -106,11 +118,18 @@ def load_phrases() -> dict:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
+    if DATA_FILE != DEFAULT_DATA_FILE and os.path.exists(DEFAULT_DATA_FILE):
+        try:
+            with open(DEFAULT_DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
     return DEFAULT_PHRASES.copy()
 
 
 def save_phrases(phrases: dict):
     """保存话术库"""
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(phrases, f, ensure_ascii=False, indent=2)
 
@@ -141,6 +160,42 @@ def phrase_preview_text(phrase) -> str:
 def has_images(phrase) -> bool:
     """话术中是否含有图片块。"""
     return any(b.get("type") == "image" for b in normalize_phrase(phrase))
+
+
+def extract_variables(blocks: list) -> list[str]:
+    """按出现顺序提取 {{变量名}} 占位符，内置日期/时间变量不要求用户填写。"""
+    seen = set()
+    names = []
+    for block in blocks:
+        if block.get("type") != "text":
+            continue
+        for name in VARIABLE_PATTERN.findall(block.get("content", "")):
+            if name in SYSTEM_VARIABLES or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def render_template_text(text: str, values: dict[str, str]) -> str:
+    """替换文本中的 {{变量名}}。未填写的变量保留原样，避免误删内容。"""
+    def repl(match):
+        name = match.group(1).strip()
+        if name in SYSTEM_VARIABLES:
+            return SYSTEM_VARIABLES[name]()
+        value = values.get(name, "")
+        return value if value else match.group(0)
+
+    return VARIABLE_PATTERN.sub(repl, text)
+
+
+def render_template_blocks(blocks: list, values: dict[str, str]) -> list:
+    """返回替换变量后的 blocks 副本。"""
+    rendered = copy.deepcopy(blocks)
+    for block in rendered:
+        if block.get("type") == "text":
+            block["content"] = render_template_text(block.get("content", ""), values)
+    return rendered
 
 
 def make_thumbnail(path: str, size: tuple = (72, 54)):
@@ -240,7 +295,7 @@ class BlockEditor(ctk.CTkToplevel):
 
         inner = ctk.CTkFrame(add_bar, fg_color="transparent")
         inner.pack(fill="both", expand=True, padx=12, pady=8)
-        inner.grid_columnconfigure((0, 1), weight=1)
+        inner.grid_columnconfigure((0, 1, 2), weight=1)
 
         ctk.CTkButton(
             inner, text="＋ 添加文字", height=34, corner_radius=8,
@@ -256,7 +311,15 @@ class BlockEditor(ctk.CTkToplevel):
             text_color="#fa8c16", hover_color="#fff8f0",
             font=ctk.CTkFont(size=11),
             command=self._add_image,
-        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+        ).grid(row=0, column=1, padx=4, sticky="ew")
+
+        ctk.CTkButton(
+            inner, text="{{变量}}", height=34, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#555", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=self._insert_variable,
+        ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
 
         self._render_all()
 
@@ -452,6 +515,28 @@ class BlockEditor(ctk.CTkToplevel):
             self._active_idx = len(self.blocks) - 1
             self._render_all()
 
+    def _insert_variable(self):
+        dialog = ctk.CTkInputDialog(
+            text="输入变量名，例如：客户名、订单号、日期、时间、星期",
+            title="插入变量",
+        )
+        name = dialog.get_input()
+        if not name or not name.strip():
+            return
+        token = "{{" + name.strip() + "}}"
+        tb = self._text_widgets.get(self._active_idx)
+        if not tb:
+            self._sync_all_texts()
+            self.blocks.append({"type": "text", "content": token})
+            self._active_idx = len(self.blocks) - 1
+            self._render_all()
+            return
+        try:
+            tb.insert("insert", token)
+            self.blocks[self._active_idx]["content"] = tb.get("1.0", "end").strip()
+        except Exception:
+            pass
+
     def _replace_image(self, i: int):
         from tkinter import filedialog
         self._sync_all_texts()
@@ -494,13 +579,14 @@ class PhraseCard(ctk.CTkFrame):
     SELECTED_BG    = "#e6f0ff"
     SELECTED_BORDER = "#bbd6ff"
 
-    def __init__(self, parent, phrase, on_send, on_select, on_edit=None, **kwargs):
+    def __init__(self, parent, phrase, on_send, on_select, on_edit=None, index: int | None = None, **kwargs):
         super().__init__(parent, corner_radius=10, fg_color=self.NORMAL_BG,
                          border_width=1, border_color="#e8e8e8", **kwargs)
         self._phrase = phrase
         self._on_send = on_send
         self._on_select = on_select
         self._on_edit = on_edit
+        self._index = index
         self._selected = False
         self._build()
 
@@ -510,9 +596,10 @@ class PhraseCard(ctk.CTkFrame):
         preview = phrase_preview_text(self._phrase)
         has_img = has_images(self._phrase)
 
+        prefix = f"{self._index}. " if self._index is not None else ""
         self._label = ctk.CTkLabel(
             self,
-            text=("🖼 " if has_img else "") + preview,
+            text=prefix + ("🖼 " if has_img else "") + preview,
             wraplength=200,
             justify="left", anchor="w",
             text_color="#333",
@@ -583,6 +670,8 @@ class WXSenderApp:
         self.phrases = load_phrases()
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
         self._selected_card = None  # 当前选中的卡片
+        self._visible_phrases = []
+        self._search_after_id = None
 
         bounds = get_wechat_window_bounds()
         if bounds:
@@ -593,6 +682,7 @@ class WXSenderApp:
         self._last_bounds = bounds
 
         self._build_ui()
+        self._bind_shortcuts()
         self.root.after(100, self._poll_snap)
 
     def _build_ui(self):
@@ -619,6 +709,13 @@ class WXSenderApp:
                        font=ctk.CTkFont(size=16),
                        command=self._check_status).pack(side="right", padx=8)
 
+        ctk.CTkButton(status_frame, text="权限", width=48, height=30,
+                       corner_radius=8, fg_color="transparent",
+                       border_width=1, border_color="#4a9eff",
+                       hover_color=PRIMARY_H, text_color="white",
+                       font=ctk.CTkFont(size=11),
+                       command=self._show_permission_guide).pack(side="right", padx=(0, 4))
+
         # ── 分组选择 ──
         group_frame = ctk.CTkFrame(self.root, fg_color="transparent")
         group_frame.pack(fill="x", padx=12, pady=(10, 4))
@@ -644,6 +741,30 @@ class WXSenderApp:
                        text_color=PRIMARY, hover_color=CARD_BG,
                        font=ctk.CTkFont(size=11),
                        command=self._add_group).pack(side="right")
+
+        # ── 搜索 ──
+        search_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        search_frame.pack(fill="x", padx=12, pady=(0, 8))
+        self.search_var = ctk.StringVar(value="")
+        self.search_entry = ctk.CTkEntry(
+            search_frame,
+            textvariable=self.search_var,
+            height=30,
+            corner_radius=8,
+            border_width=1,
+            border_color="#dce8ff",
+            placeholder_text="搜索当前分组话术",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+        )
+        self.search_entry.pack(side="left", fill="x", expand=True)
+        self.search_var.trace_add("write", self._on_search_change)
+        ctk.CTkButton(
+            search_frame, text="清空", width=48, height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=self._clear_search,
+        ).pack(side="right", padx=(6, 0))
 
         # ── 话术卡片列表 ──
         self.cards_frame = ctk.CTkScrollableFrame(
@@ -705,6 +826,13 @@ class WXSenderApp:
             command=self._read_chat,
         ).pack(fill="x")
 
+        ctk.CTkLabel(
+            bottom_frame,
+            text="快捷键：⌘F 搜索 · ⌘↩ 发送自定义 · ⌘1-9 发送可见话术 · Esc 清空搜索",
+            text_color="#8c8c8c",
+            font=ctk.CTkFont(family="PingFang SC", size=10),
+        ).pack(fill="x", pady=(6, 0))
+
         # ── 初始化 ──
         self._refresh_cards()
         self._check_status()
@@ -714,13 +842,30 @@ class WXSenderApp:
             widget.destroy()
         self._selected_card = None
         group = self.group_var.get()
-        for i, phrase in enumerate(self.phrases.get(group, [])):
+        all_phrases = self.phrases.get(group, [])
+        query = self.search_var.get().strip().lower() if hasattr(self, "search_var") else ""
+        indexed_phrases = [
+            (i, phrase) for i, phrase in enumerate(all_phrases)
+            if not query or query in phrase_preview_text(phrase).lower()
+        ]
+        self._visible_phrases = [phrase for _, phrase in indexed_phrases]
+
+        if not indexed_phrases:
+            empty_text = "当前分组暂无话术" if not query else "没有匹配的话术"
+            ctk.CTkLabel(
+                self.cards_frame, text=empty_text, text_color="#8c8c8c",
+                font=ctk.CTkFont(family="PingFang SC", size=12),
+            ).pack(pady=24)
+            return
+
+        for visible_i, (i, phrase) in enumerate(indexed_phrases, 1):
             card = PhraseCard(
                 self.cards_frame,
                 phrase=phrase,
                 on_send=lambda p=phrase: self._do_send(p),
                 on_select=self._select_card,
                 on_edit=lambda idx=i: self._edit_phrase(idx),
+                index=visible_i if visible_i <= 9 else None,
             )
             card.pack(fill="x", pady=(0, 5))
 
@@ -733,6 +878,34 @@ class WXSenderApp:
     def _on_group_change(self, value=None):
         self.current_group = self.group_var.get()
         self._refresh_cards()
+
+    def _on_search_change(self, *_):
+        if self._search_after_id:
+            self.root.after_cancel(self._search_after_id)
+        self._search_after_id = self.root.after(120, self._refresh_cards)
+
+    def _clear_search(self):
+        self.search_var.set("")
+        self.search_entry.focus_set()
+
+    def _bind_shortcuts(self):
+        self.root.bind("<Command-f>", lambda e: self._focus_search())
+        self.root.bind("<Command-F>", lambda e: self._focus_search())
+        self.root.bind("<Command-Return>", lambda e: self._send_custom())
+        self.root.bind("<Command-KP_Enter>", lambda e: self._send_custom())
+        self.root.bind("<Escape>", lambda e: self._clear_search())
+        for i in range(1, 10):
+            self.root.bind(f"<Command-Key-{i}>", lambda e, idx=i: self._send_visible_phrase(idx))
+
+    def _focus_search(self):
+        self.search_entry.focus_set()
+        self.search_entry.select_range(0, "end")
+        return "break"
+
+    def _send_visible_phrase(self, idx: int):
+        if 1 <= idx <= len(self._visible_phrases):
+            self._do_send(self._visible_phrases[idx - 1])
+        return "break"
 
     def _poll_snap(self):
         """每 100ms 直接在主线程读取窗口坐标（AX API 调用 <5ms，无需后台线程）"""
@@ -752,12 +925,83 @@ class WXSenderApp:
         threading.Thread(target=check, daemon=True).start()
 
     def _update_status(self, running: bool):
-        if running:
+        if not AXIsProcessTrusted():
+            self.status_dot.configure(text_color=DOT_WAIT)
+            self.status_label.configure(text="需要辅助功能权限")
+        elif running:
             self.status_dot.configure(text_color=DOT_OK)
             self.status_label.configure(text="企业微信已连接")
         else:
             self.status_dot.configure(text_color=DOT_ERR)
             self.status_label.configure(text="企业微信未运行")
+
+    def _open_accessibility_settings(self):
+        subprocess.run(
+            ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
+            check=False,
+        )
+
+    def _show_permission_guide(self):
+        win = ctk.CTkToplevel(self.root)
+        win.title("权限引导")
+        win.geometry("520x420")
+        win.attributes("-topmost", True)
+        win.grab_set()
+
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        ctk.CTkLabel(
+            header, text="权限引导", text_color="white",
+            font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
+        ).pack(side="left", padx=12)
+        ctk.CTkButton(
+            header, text="✕", width=32, height=32, corner_radius=8,
+            fg_color="transparent", hover_color=PRIMARY_H,
+            text_color="white", font=ctk.CTkFont(size=14),
+            command=win.destroy,
+        ).pack(side="right", padx=8)
+
+        content = ctk.CTkFrame(win, fg_color="#f5f7ff", corner_radius=0)
+        content.pack(fill="both", expand=True)
+
+        trusted = AXIsProcessTrusted()
+        status_text = "辅助功能权限已授权" if trusted else "尚未检测到辅助功能权限"
+        status_color = DOT_OK if trusted else DOT_WAIT
+        ctk.CTkLabel(
+            content, text=status_text, text_color=status_color,
+            font=ctk.CTkFont(family="PingFang SC", size=14, weight="bold"),
+        ).pack(anchor="w", padx=18, pady=(18, 10))
+
+        guide_text = (
+            "1. 打开 系统设置 → 隐私与安全性 → 辅助功能。\n"
+            "2. 勾选当前运行入口：Terminal、PyCharm/Cursor，或打包后的企业微信快捷发送。\n"
+            "3. 如果已勾选但仍失败，先关闭本工具再重新打开。\n"
+            "4. 发送图片或快捷键粘贴还需要允许系统事件控制。"
+        )
+        guide = ctk.CTkTextbox(
+            content, height=180, corner_radius=8, border_width=1,
+            border_color="#dce8ff",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+        )
+        guide.pack(fill="x", padx=18, pady=(0, 12))
+        guide.insert("end", guide_text)
+        guide.configure(state="disabled")
+
+        ctk.CTkButton(
+            content, text="打开辅助功能设置", height=34, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=self._open_accessibility_settings,
+        ).pack(fill="x", padx=18, pady=(0, 8))
+
+        ctk.CTkButton(
+            content, text="重新检测", height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=11),
+            command=lambda: (win.destroy(), self._check_status(), self._show_permission_guide()),
+        ).pack(fill="x", padx=18)
 
     # ── 辅助：对话框在 topmost 窗口下的兼容方法 ──────────────────
     # macOS 上 CTk -topmost 窗口处于 NSFloatingWindowLevel，
@@ -844,15 +1088,152 @@ class WXSenderApp:
         if not text:
             self._show_warning("请输入消息内容")
             return
-        self._do_send(text)
-        self.custom_input.delete("1.0", "end")
+        self._do_send(text, on_confirm=lambda: self.custom_input.delete("1.0", "end"))
 
-    def _do_send(self, phrase):
-        """发送话术（str 或 list of blocks）。
-
-        纯文本沿用原发送链路；含图片的话术渲染为一张图片，保证只发一条消息。
-        """
+    def _do_send(self, phrase, on_confirm=None):
+        """打开发送预览，确认后发送话术（str 或 list of blocks）。"""
         blocks = normalize_phrase(phrase)
+        self._open_send_preview(blocks, on_confirm=on_confirm)
+
+    def _open_send_preview(self, blocks: list, on_confirm=None):
+        variables = extract_variables(blocks)
+        values = {}
+
+        win = ctk.CTkToplevel(self.root)
+        win.title("发送预览")
+        win.geometry("520x560")
+        win.attributes("-topmost", True)
+        win.grab_set()
+
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        ctk.CTkLabel(
+            header, text="发送预览", text_color="white",
+            font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
+        ).pack(side="left", padx=12)
+        ctk.CTkButton(
+            header, text="✕", width=32, height=32, corner_radius=8,
+            fg_color="transparent", hover_color=PRIMARY_H,
+            text_color="white", font=ctk.CTkFont(size=14),
+            command=win.destroy,
+        ).pack(side="right", padx=8)
+
+        body = ctk.CTkFrame(win, fg_color="#f5f7ff", corner_radius=0)
+        body.pack(fill="both", expand=True)
+
+        entry_vars = {}
+        if variables:
+            var_frame = ctk.CTkFrame(body, fg_color="white", corner_radius=8)
+            var_frame.pack(fill="x", padx=12, pady=(12, 8))
+            var_frame.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(
+                var_frame, text="变量", anchor="w",
+                font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+                text_color="#333",
+            ).grid(row=0, column=0, columnspan=2, padx=10, pady=(8, 4), sticky="w")
+            for row, name in enumerate(variables, 1):
+                ctk.CTkLabel(
+                    var_frame, text=name, anchor="w",
+                    font=ctk.CTkFont(family="PingFang SC", size=11),
+                    text_color="#666",
+                ).grid(row=row, column=0, padx=(10, 8), pady=5, sticky="w")
+                sv = ctk.StringVar(value="")
+                entry_vars[name] = sv
+                entry = ctk.CTkEntry(
+                    var_frame, textvariable=sv, height=28, corner_radius=7,
+                    border_color="#dce8ff", placeholder_text=f"填写{name}",
+                    font=ctk.CTkFont(family="PingFang SC", size=12),
+                )
+                entry.grid(row=row, column=1, padx=(0, 10), pady=5, sticky="ew")
+                sv.trace_add("write", lambda *_: refresh_preview())
+            first_entry = var_frame.grid_slaves(row=1, column=1)
+            if first_entry:
+                win.after(80, first_entry[0].focus_set)
+
+        ctk.CTkLabel(
+            body, text="预览内容", anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            text_color="#333",
+        ).pack(fill="x", padx=16, pady=(6, 4))
+
+        preview = ctk.CTkTextbox(
+            body, height=230, corner_radius=8, border_width=1,
+            border_color="#dce8ff",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+        )
+        preview.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        hint = ctk.CTkLabel(
+            body,
+            text="内置变量：{{日期}}、{{时间}}、{{星期}} 会自动替换。",
+            text_color="#8c8c8c",
+            font=ctk.CTkFont(family="PingFang SC", size=10),
+        )
+        hint.pack(fill="x", padx=12, pady=(0, 8))
+
+        error_label = ctk.CTkLabel(
+            body, text="", text_color=DOT_ERR,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        error_label.pack(fill="x", padx=12, pady=(0, 6))
+
+        footer = ctk.CTkFrame(win, fg_color="white", height=52, corner_radius=0)
+        footer.pack(fill="x")
+        footer.pack_propagate(False)
+
+        def current_values():
+            return {name: var.get().strip() for name, var in entry_vars.items()}
+
+        def preview_text(rendered_blocks):
+            lines = []
+            for block in rendered_blocks:
+                if block.get("type") == "text":
+                    content = block.get("content", "").strip()
+                    if content:
+                        lines.append(content)
+                elif block.get("type") == "image":
+                    lines.append(f"[图片] {os.path.basename(block.get('path', ''))}")
+            return "\n\n".join(lines)
+
+        def refresh_preview():
+            rendered = render_template_blocks(blocks, current_values())
+            preview.configure(state="normal")
+            preview.delete("1.0", "end")
+            preview.insert("end", preview_text(rendered))
+            preview.configure(state="disabled")
+
+        def confirm_send():
+            missing = [name for name, var in entry_vars.items() if not var.get().strip()]
+            if missing:
+                error_label.configure(text=f"请填写变量：{', '.join(missing)}")
+                return
+            error_label.configure(text="")
+            rendered = render_template_blocks(blocks, current_values())
+            win.destroy()
+            if on_confirm:
+                on_confirm()
+            self._send_blocks_async(rendered)
+
+        ctk.CTkButton(
+            footer, text="取消", width=80, height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=win.destroy,
+        ).pack(side="right", padx=(4, 12), pady=10)
+
+        ctk.CTkButton(
+            footer, text="确认发送", width=96, height=32, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=confirm_send,
+        ).pack(side="right", padx=4, pady=10)
+
+        refresh_preview()
+
+    def _send_blocks_async(self, blocks: list):
+        """确认后实际发送。纯文本沿用原链路；含图片渲染为一张图片保证单条消息。"""
 
         def send_task():
             try:
