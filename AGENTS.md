@@ -203,6 +203,13 @@ docs/
 
 8. **macOS 安装包**：`build.spec` 必须 `collect_all('customtkinter')` + `collect_all('tkinter')`，否则启动崩溃。`DATA_FILE` 必须在 `~/Library/Application Support/`，bundle 内只读。
 
+9. **个人版基础体验（2026-05-28）**：`codex-personal-basics-weeks-1-2` 分支补齐搜索、快捷键、变量模板、发送预览、权限引导和安装包。
+   - 搜索只过滤当前分组，`⌘1` 到 `⌘9` 发送当前可见结果。
+   - 发送统一先进入预览弹窗；自定义消息确认发送后才清空输入框。
+   - 模板变量格式为 `{{变量名}}`；`{{日期}}`、`{{时间}}`、`{{星期}}` 为内置变量，发送预览中自动替换。
+   - 打包脚本优先使用 `uv pip install`，找不到 `uv` 时降级为 `.venv/bin/python -m pip install`。
+   - `build/` 与 `dist/` 是本地构建产物，已加入 `.gitignore`；验证产物为 `dist/wechat-sender.dmg`。
+
 ---
 
 ## 常用命令
