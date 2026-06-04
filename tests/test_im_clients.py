@@ -96,15 +96,12 @@ class IMClientAdapterTests(unittest.TestCase):
         sender_mock.send_blocks_single.assert_called_once_with([{"type": "image", "path": "/tmp/a.png"}])
 
     def test_generic_adapter_uses_running_app_for_activation_and_bounds(self):
+        from im_clients.base import IMClientAdapter
+        adapter = IMClientAdapter()
+        adapter.app_names = ("TestApp",)
+
         running_app = Mock()
         running_app.activateWithOptions_.return_value = None
-        adapter = next(
-            client.adapter
-            for client in discover_clients(
-                [ApplicationInfo(name="大象", bundle_id="com.sankuai.daxiang", running=True, pid=1234)]
-            )
-            if client.client_id == "daxiang"
-        )
         adapter.set_runtime_app_provider(lambda: running_app)
         adapter.set_window_bounds_provider(lambda: (1, 2, 3, 4))
 
