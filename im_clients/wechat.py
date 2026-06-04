@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 
+import sender  # 复用企业微信已验证的图片合成逻辑（render_blocks_to_image）
 from .ax_helpers import (
     activate_app,
     bfs_find_msg_table,
@@ -87,8 +88,8 @@ class WechatAdapter(IMClientAdapter):
                 raise UnsupportedClientAction("微信未找到聊天输入框，请先选中一个聊天")
         except UnsupportedClientAction:
             raise
-        except Exception:
-            raise UnsupportedClientAction("微信 AX 访问失败，请检查辅助功能权限")
+        except Exception as e:
+            raise UnsupportedClientAction("微信 AX 访问失败，请检查辅助功能权限") from e
 
         has_image = any(b.get("type") == "image" for b in blocks if isinstance(b, dict))
 
@@ -107,16 +108,17 @@ class WechatAdapter(IMClientAdapter):
         if not text:
             return False
         original = get_clipboard_text()
-        set_clipboard_text(text)
-        paste_and_send(app_name=app_name)
-        set_clipboard_text(original)
+        try:
+            set_clipboard_text(text)
+            paste_and_send(app_name=app_name)
+        finally:
+            set_clipboard_text(original)
         return True
 
     def _send_as_image(self, blocks: list, app_name: str) -> bool:
         """图文混排：合成 PNG 发送（保证单条消息）。"""
-        import sender  # 复用企业微信已验证的图片合成逻辑
-
-        tmp = tempfile.mktemp(suffix=".png")
+        fd, tmp = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
         try:
             output_path = sender.render_blocks_to_image(blocks, output_path=tmp)
             set_clipboard_png(output_path)
