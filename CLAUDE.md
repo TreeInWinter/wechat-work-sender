@@ -15,7 +15,7 @@ macOS 辅助工具，通过 Accessibility API（AX API）自动化企业微信�
 - **GUI**：CustomTkinter 5.2.x（不是原生 tkinter）
 - **macOS 集成**：pyobjc-framework-{Cocoa, Quartz, ApplicationServices}
 - **图片处理**：Pillow（缩略图，`uv pip install Pillow`）
-- **Python**：3.13，venv 用 `uv` 管理（`.venv/bin/python`）
+- **Python**：3.10+ 且带 Tk 支持，当前推荐 Miniconda 3.13，venv 用 `uv` 管理（`.venv/bin/python`）
 - **远端仓库**：`ssh://git@git.sankuai.com/~baijinshan/wechat_work_sender.git`（美团内部）
 
 ---
@@ -145,6 +145,10 @@ content = raw[:half] if half and raw[:half] == raw[half:] else raw
 ```
 
 部分消息 `kAXValueAttribute` 会重复两次（AX 渲染层 bug）。
+
+### 10. AI 回复助手调用 `mc --code`，但必须人工确认发送
+
+AI 回复第一版使用 `mc --code -p --tools "" --no-session-persistence` 作为可配置命令入口。GUI 只展示候选回复并要求人工确认，不做自动发送。AI 调用封装在 `ai_reply.py`，便于未来替换为 Ollama、HTTP 接口或其他公司内部 CLI。
 
 ---
 

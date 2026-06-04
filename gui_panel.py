@@ -31,7 +31,16 @@ from ApplicationServices import (
     AXIsProcessTrusted,
 )
 
-from sender import send_blocks, send_blocks_single, is_wx_running, NoChatWindowError, read_chat_messages
+from sender import NoChatWindowError
+from im_clients.base import UnsupportedClientAction
+from im_clients.registry import choose_default_client, discover_clients
+from ai_reply import (
+    AICommandFailedError,
+    AICommandNotFoundError,
+    AICommandTimeoutError,
+    AIEmptyResponseError,
+    generate_reply,
+)
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -196,6 +205,25 @@ def render_template_blocks(blocks: list, values: dict[str, str]) -> list:
         if block.get("type") == "text":
             block["content"] = render_template_text(block.get("content", ""), values)
     return rendered
+
+
+def prepare_direct_send_blocks(blocks: list) -> list:
+    """主界面直接发送前渲染内置变量，不弹出发送预览。"""
+    return render_template_blocks(blocks, {})
+
+
+def send_blocks_with_client(client, blocks: list) -> bool:
+    """通过当前接管对象发送话术块。"""
+    if client is None:
+        raise UnsupportedClientAction("请先选择接管对象")
+    return client.adapter.send_blocks(blocks)
+
+
+def read_chat_with_client(client, max_messages: int = 20) -> list[dict]:
+    """通过当前接管对象读取聊天内容。"""
+    if client is None:
+        raise UnsupportedClientAction("请先选择接管对象")
+    return client.adapter.read_chat_messages(max_messages=max_messages)
 
 
 def make_thumbnail(path: str, size: tuple = (72, 54)):
@@ -672,8 +700,15 @@ class WXSenderApp:
         self._selected_card = None  # 当前选中的卡片
         self._visible_phrases = []
         self._search_after_id = None
+        self.mode_var = ctk.StringVar(value="phrases")
+        self._ai_messages = []
+        self._ai_generating = False
+        self.clients = discover_clients()
+        self.current_client = choose_default_client(self.clients)
+        self._client_label_to_id = {}
+        self.target_var = ctk.StringVar(value="")
 
-        bounds = get_wechat_window_bounds()
+        bounds = self._current_window_bounds()
         if bounds:
             wx, wy, ww, wh = bounds
             self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
@@ -707,7 +742,7 @@ class WXSenderApp:
                        corner_radius=8, fg_color="transparent",
                        hover_color=PRIMARY_H, text_color="white",
                        font=ctk.CTkFont(size=16),
-                       command=self._check_status).pack(side="right", padx=8)
+                       command=self._refresh_targets_and_status).pack(side="right", padx=8)
 
         ctk.CTkButton(status_frame, text="权限", width=48, height=30,
                        corner_radius=8, fg_color="transparent",
@@ -716,8 +751,51 @@ class WXSenderApp:
                        font=ctk.CTkFont(size=11),
                        command=self._show_permission_guide).pack(side="right", padx=(0, 4))
 
+        self.target_menu = ctk.CTkOptionMenu(
+            status_frame,
+            values=["检测中"],
+            variable=self.target_var,
+            width=132,
+            height=30,
+            corner_radius=8,
+            fg_color="white",
+            button_color=PRIMARY_H,
+            button_hover_color=PRIMARY,
+            text_color="#333",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            dropdown_font=ctk.CTkFont(family="PingFang SC", size=11),
+            command=self._on_target_change,
+        )
+        self.target_menu.pack(side="right", padx=(0, 6))
+        self._refresh_client_menu()
+
+        # ── 模式切换 ──
+        self.mode_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        self.mode_frame.pack(fill="x", padx=12, pady=(10, 4))
+        self.mode_frame.grid_columnconfigure((0, 1), weight=1)
+
+        self.phrase_mode_btn = ctk.CTkButton(
+            self.mode_frame, text="话术", height=30, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=lambda: self._switch_mode("phrases"),
+        )
+        self.phrase_mode_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        self.ai_mode_btn = ctk.CTkButton(
+            self.mode_frame, text="AI 助手", height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            command=lambda: self._switch_mode("ai"),
+        )
+        self.ai_mode_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        self.phrase_view = ctk.CTkFrame(self.root, fg_color="transparent")
+        self.phrase_view.pack(fill="both", expand=True)
+
         # ── 分组选择 ──
-        group_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        group_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
         group_frame.pack(fill="x", padx=12, pady=(10, 4))
 
         ctk.CTkLabel(group_frame, text="分组",
@@ -743,7 +821,7 @@ class WXSenderApp:
                        command=self._add_group).pack(side="right")
 
         # ── 搜索 ──
-        search_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        search_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
         search_frame.pack(fill="x", padx=12, pady=(0, 8))
         self.search_var = ctk.StringVar(value="")
         self.search_entry = ctk.CTkEntry(
@@ -768,7 +846,7 @@ class WXSenderApp:
 
         # ── 话术卡片列表 ──
         self.cards_frame = ctk.CTkScrollableFrame(
-            self.root, fg_color=PANEL_BG, corner_radius=0,
+            self.phrase_view, fg_color=PANEL_BG, corner_radius=0,
             scrollbar_button_color=PRIMARY,
             scrollbar_button_hover_color=PRIMARY_H,
         )
@@ -776,7 +854,7 @@ class WXSenderApp:
         self.cards_frame.grid_columnconfigure(0, weight=1)
 
         # ── 操作按钮 ──
-        btn_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        btn_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
         btn_frame.pack(fill="x", padx=12, pady=(0, 6))
         btn_frame.grid_columnconfigure((0, 1), weight=1)
 
@@ -797,11 +875,11 @@ class WXSenderApp:
         ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         # ── 分隔线 ──
-        ctk.CTkFrame(self.root, height=1, fg_color="#dce8ff", corner_radius=0).pack(
+        ctk.CTkFrame(self.phrase_view, height=1, fg_color="#dce8ff", corner_radius=0).pack(
             fill="x", padx=12, pady=(2, 8))
 
         # ── 自定义消息 ──
-        bottom_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        bottom_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
         bottom_frame.pack(fill="x", padx=12, pady=(0, 10))
 
         self.custom_input = ctk.CTkTextbox(
@@ -833,9 +911,285 @@ class WXSenderApp:
             font=ctk.CTkFont(family="PingFang SC", size=10),
         ).pack(fill="x", pady=(6, 0))
 
+        self.ai_view = ctk.CTkFrame(self.root, fg_color="transparent")
+        self._build_ai_view()
+
         # ── 初始化 ──
         self._refresh_cards()
         self._check_status()
+
+    def _refresh_client_menu(self):
+        selected_id = self.current_client.client_id if self.current_client else None
+        self.clients = discover_clients()
+        if selected_id:
+            self.current_client = next(
+                (client for client in self.clients if client.client_id == selected_id),
+                None,
+            )
+        if self.current_client is None:
+            self.current_client = choose_default_client(self.clients)
+
+        self._client_label_to_id = {client.menu_label: client.client_id for client in self.clients}
+        labels = list(self._client_label_to_id.keys()) or ["无可用对象"]
+        self.target_menu.configure(values=labels)
+        if self.current_client:
+            self.target_var.set(self.current_client.menu_label)
+        elif labels:
+            self.target_var.set(labels[0])
+
+    def _on_target_change(self, label: str):
+        client_id = self._client_label_to_id.get(label)
+        if not client_id:
+            return
+        self.current_client = next(
+            (client for client in self.clients if client.client_id == client_id),
+            self.current_client,
+        )
+        self._last_bounds = None
+        self._check_status()
+
+    def _refresh_targets_and_status(self):
+        self._refresh_client_menu()
+        self._check_status()
+
+    def _current_window_bounds(self) -> tuple | None:
+        if not self.current_client:
+            return None
+        return self.current_client.adapter.window_bounds()
+
+    def _current_client_name(self) -> str:
+        return self.current_client.display_name if self.current_client else "当前接管对象"
+
+    def _switch_mode(self, mode: str):
+        self.mode_var.set(mode)
+        if mode == "ai":
+            self.phrase_view.pack_forget()
+            self.ai_view.pack(fill="both", expand=True)
+            self.phrase_mode_btn.configure(
+                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                text_color=PRIMARY, hover_color=CARD_BG,
+                font=ctk.CTkFont(family="PingFang SC", size=12),
+            )
+            self.ai_mode_btn.configure(
+                fg_color=PRIMARY, border_width=0, text_color="white",
+                hover_color=PRIMARY_H,
+                font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            )
+        else:
+            self.ai_view.pack_forget()
+            self.phrase_view.pack(fill="both", expand=True)
+            self.phrase_mode_btn.configure(
+                fg_color=PRIMARY, border_width=0, text_color="white",
+                hover_color=PRIMARY_H,
+                font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            )
+            self.ai_mode_btn.configure(
+                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                text_color=PRIMARY, hover_color=CARD_BG,
+                font=ctk.CTkFont(family="PingFang SC", size=12),
+            )
+
+    def _build_ai_view(self):
+        action_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        action_frame.pack(fill="x", padx=12, pady=(8, 6))
+        action_frame.grid_columnconfigure((0, 1), weight=1)
+
+        self.ai_generate_btn = ctk.CTkButton(
+            action_frame, text="读取并生成", height=34, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=self._ai_read_and_generate,
+        )
+        self.ai_generate_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        self.ai_regenerate_btn = ctk.CTkButton(
+            action_frame, text="重新生成", height=34, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            command=self._ai_regenerate,
+        )
+        self.ai_regenerate_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        self.ai_status_label = ctk.CTkLabel(
+            self.ai_view, text="选中当前接管对象聊天后，读取会话并生成回复。",
+            text_color="#8c8c8c", anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        self.ai_status_label.pack(fill="x", padx=14, pady=(0, 6))
+
+        ctk.CTkLabel(
+            self.ai_view, text="聊天上下文", anchor="w",
+            text_color="#333", font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+        ).pack(fill="x", padx=14, pady=(4, 4))
+
+        self.ai_context_box = ctk.CTkTextbox(
+            self.ai_view, height=140, corner_radius=8, border_width=1,
+            border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        self.ai_context_box.pack(fill="x", padx=12, pady=(0, 8))
+        self.ai_context_box.configure(state="disabled")
+
+        ctk.CTkLabel(
+            self.ai_view, text="候选回复", anchor="w",
+            text_color="#333", font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+        ).pack(fill="x", padx=14, pady=(4, 4))
+
+        self.ai_reply_box = ctk.CTkTextbox(
+            self.ai_view, height=160, corner_radius=8, border_width=1,
+            border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=12),
+        )
+        self.ai_reply_box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        utility_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        utility_frame.pack(fill="x", padx=12, pady=(0, 6))
+        utility_frame.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkButton(
+            utility_frame, text="复制", height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=self._ai_copy_reply,
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        ctk.CTkButton(
+            utility_frame, text="清空", height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=self._ai_clear_reply,
+        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        ctk.CTkButton(
+            self.ai_view, text="确认发送", height=36, corner_radius=10,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=self._ai_send_reply,
+        ).pack(fill="x", padx=12, pady=(0, 10))
+
+    def _ai_set_status(self, text: str):
+        self.ai_status_label.configure(text=text)
+
+    def _ai_set_context(self, text: str):
+        self.ai_context_box.configure(state="normal")
+        self.ai_context_box.delete("1.0", "end")
+        self.ai_context_box.insert("end", text)
+        self.ai_context_box.configure(state="disabled")
+
+    def _ai_set_reply(self, text: str):
+        self.ai_reply_box.delete("1.0", "end")
+        self.ai_reply_box.insert("end", text)
+
+    def _ai_get_reply(self) -> str:
+        return self.ai_reply_box.get("1.0", "end").strip()
+
+    def _format_ai_messages(self, msgs: list) -> str:
+        lines = []
+        for msg in msgs:
+            time_str = f"[{msg['time']}] " if msg.get("time") else ""
+            lines.append(f"{time_str}{msg.get('content', '')}")
+        return "\n\n".join(lines)
+
+    def _ai_read_and_generate(self):
+        if self._ai_generating:
+            return
+        self._ai_set_status("正在读取聊天内容...")
+        self.ai_generate_btn.configure(state="disabled")
+        client = self.current_client
+
+        def fetch():
+            try:
+                msgs = read_chat_with_client(client, max_messages=30)
+                self.root.after(0, lambda: self._ai_after_read(msgs))
+            except UnsupportedClientAction as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: self._ai_read_failed(msg))
+            except Exception as exc:
+                msg = f"读取失败: {exc}"
+                self.root.after(0, lambda: self._ai_read_failed(msg))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _ai_after_read(self, msgs: list):
+        self._ai_messages = msgs
+        self.ai_generate_btn.configure(state="normal")
+        if not msgs:
+            self._ai_set_context(f"未读取到消息，请先在{self._current_client_name()}中选中聊天窗口。")
+            self._ai_set_status("未读取到聊天内容")
+            return
+        self._ai_set_context(self._format_ai_messages(msgs))
+        self._ai_generate_async(msgs)
+
+    def _ai_read_failed(self, message: str):
+        self.ai_generate_btn.configure(state="normal")
+        self._ai_set_context(message)
+        self._ai_set_status(message)
+
+    def _ai_regenerate(self):
+        if self._ai_generating:
+            return
+        if not self._ai_messages:
+            self._ai_read_and_generate()
+            return
+        self._ai_generate_async(self._ai_messages)
+
+    def _ai_generate_async(self, msgs: list):
+        self._ai_generating = True
+        self.ai_generate_btn.configure(state="disabled")
+        self.ai_regenerate_btn.configure(state="disabled")
+        self._ai_set_status("正在调用 AI 生成回复...")
+
+        def generate_task():
+            try:
+                reply = generate_reply(msgs)
+                self.root.after(0, lambda: self._ai_generation_done(reply))
+            except (
+                AICommandNotFoundError,
+                AICommandTimeoutError,
+                AICommandFailedError,
+                AIEmptyResponseError,
+            ) as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: self._ai_generation_failed(msg))
+            except Exception as exc:
+                msg = f"AI 生成失败: {exc}"
+                self.root.after(0, lambda: self._ai_generation_failed(msg))
+
+        threading.Thread(target=generate_task, daemon=True).start()
+
+    def _ai_generation_done(self, reply: str):
+        self._ai_generating = False
+        self.ai_generate_btn.configure(state="normal")
+        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_reply(reply)
+        self._ai_set_status("AI 回复已生成，可编辑后发送")
+
+    def _ai_generation_failed(self, message: str):
+        self._ai_generating = False
+        self.ai_generate_btn.configure(state="normal")
+        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_status(message)
+
+    def _ai_copy_reply(self):
+        reply = self._ai_get_reply()
+        if not reply:
+            self._show_warning("暂无可复制的回复")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(reply)
+        self._ai_set_status("候选回复已复制")
+
+    def _ai_clear_reply(self):
+        self._ai_set_reply("")
+        self._ai_set_status("候选回复已清空")
+
+    def _ai_send_reply(self):
+        reply = self._ai_get_reply()
+        if not reply:
+            self._show_warning("请先生成或输入回复内容")
+            return
+        self._do_send(reply)
 
     def _refresh_cards(self):
         for widget in self.cards_frame.winfo_children():
@@ -909,7 +1263,7 @@ class WXSenderApp:
 
     def _poll_snap(self):
         """每 100ms 直接在主线程读取窗口坐标（AX API 调用 <5ms，无需后台线程）"""
-        bounds = get_wechat_window_bounds()
+        bounds = self._current_window_bounds()
         if bounds and bounds != self._last_bounds:
             self._last_bounds = bounds
             wx, wy, ww, wh = bounds
@@ -917,23 +1271,34 @@ class WXSenderApp:
         self.root.after(100, self._poll_snap)
 
     def _check_status(self):
-        """检查企业微信状态"""
+        """检查当前接管对象状态"""
+        client = self.current_client
+
         def check():
-            running = is_wx_running()
-            self.root.after(0, lambda: self._update_status(running))
+            running = client.adapter.is_running() if client else False
+            self.root.after(0, lambda: self._update_status(client, running))
 
         threading.Thread(target=check, daemon=True).start()
 
-    def _update_status(self, running: bool):
+    def _update_status(self, client, running: bool):
         if not AXIsProcessTrusted():
             self.status_dot.configure(text_color=DOT_WAIT)
             self.status_label.configure(text="需要辅助功能权限")
-        elif running:
+        elif client is None:
+            self.status_dot.configure(text_color=DOT_ERR)
+            self.status_label.configure(text="未选择接管对象")
+        elif running and client.capabilities.verified:
             self.status_dot.configure(text_color=DOT_OK)
-            self.status_label.configure(text="企业微信已连接")
+            self.status_label.configure(text=f"{client.display_name}已连接")
+        elif running:
+            self.status_dot.configure(text_color=DOT_WAIT)
+            self.status_label.configure(text=f"{client.display_name}待验证")
+        elif client.installed:
+            self.status_dot.configure(text_color=DOT_ERR)
+            self.status_label.configure(text=f"{client.display_name}未运行")
         else:
             self.status_dot.configure(text_color=DOT_ERR)
-            self.status_label.configure(text="企业微信未运行")
+            self.status_label.configure(text=f"{client.display_name}未安装")
 
     def _open_accessibility_settings(self):
         subprocess.run(
@@ -1091,9 +1456,11 @@ class WXSenderApp:
         self._do_send(text, on_confirm=lambda: self.custom_input.delete("1.0", "end"))
 
     def _do_send(self, phrase, on_confirm=None):
-        """打开发送预览，确认后发送话术（str 或 list of blocks）。"""
+        """主界面发送不再弹出预览，直接执行发送。"""
         blocks = normalize_phrase(phrase)
-        self._open_send_preview(blocks, on_confirm=on_confirm)
+        if on_confirm:
+            on_confirm()
+        self._send_blocks_async(prepare_direct_send_blocks(blocks))
 
     def _open_send_preview(self, blocks: list, on_confirm=None):
         variables = extract_variables(blocks)
@@ -1234,15 +1601,18 @@ class WXSenderApp:
 
     def _send_blocks_async(self, blocks: list):
         """确认后实际发送。纯文本沿用原链路；含图片渲染为一张图片保证单条消息。"""
+        client = self.current_client
 
         def send_task():
             try:
-                if has_images(blocks):
-                    send_blocks_single(blocks)
-                else:
-                    send_blocks(blocks)
+                send_blocks_with_client(client, blocks)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
                 self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
+            except UnsupportedClientAction as e:
+                msg = str(e)
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
+                self.root.after(0, lambda: self.status_label.configure(text="接管能力待验证"))
             except NoChatWindowError as e:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
@@ -1261,12 +1631,22 @@ class WXSenderApp:
         threading.Thread(target=send_task, daemon=True).start()
 
     def _read_chat(self):
-        """读取企业微信当前聊天内容并弹窗展示"""
+        """读取当前接管对象的聊天内容并弹窗展示"""
         self.status_label.configure(text="⏳ 读取中...")
+        client = self.current_client
 
         def fetch():
-            msgs = read_chat_messages(max_messages=30)
-            self.root.after(0, lambda: self._show_chat_popup(msgs))
+            try:
+                msgs = read_chat_with_client(client, max_messages=30)
+                self.root.after(0, lambda: self._show_chat_popup(msgs))
+            except UnsupportedClientAction as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_label.configure(text="接管能力待验证"))
+            except Exception as exc:
+                msg = f"读取失败: {exc}"
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_label.configure(text="❌ 读取失败"))
 
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -1296,7 +1676,7 @@ class WXSenderApp:
         text_widget.pack(fill="both", expand=True, padx=10, pady=10)
 
         if not msgs:
-            text_widget.insert("end", "未读取到消息，请先在企业微信中选中聊天窗口。")
+            text_widget.insert("end", f"未读取到消息，请先在{self._current_client_name()}中选中聊天窗口。")
         else:
             for m in msgs:
                 time_str = f"[{m['time']}]  " if m['time'] else ""
