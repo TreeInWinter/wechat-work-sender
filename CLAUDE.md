@@ -15,7 +15,7 @@ macOS 辅助工具，通过 Accessibility API（AX API）自动化企业微信�
 - **GUI**：CustomTkinter 5.2.x（不是原生 tkinter）
 - **macOS 集成**：pyobjc-framework-{Cocoa, Quartz, ApplicationServices}
 - **图片处理**：Pillow（缩略图，`uv pip install Pillow`）
-- **Python**：3.13，venv 用 `uv` 管理（`.venv/bin/python`）
+- **Python**：3.10+ 且带 Tk 支持，当前推荐 Miniconda 3.13，venv 用 `uv` 管理（`.venv/bin/python`）
 - **远端仓库**：`ssh://git@git.sankuai.com/~baijinshan/wechat_work_sender.git`（美团内部）
 
 ---

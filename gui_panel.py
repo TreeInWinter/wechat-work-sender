@@ -205,6 +205,11 @@ def render_template_blocks(blocks: list, values: dict[str, str]) -> list:
     return rendered
 
 
+def prepare_direct_send_blocks(blocks: list) -> list:
+    """主界面直接发送前渲染内置变量，不弹出发送预览。"""
+    return render_template_blocks(blocks, {})
+
+
 def make_thumbnail(path: str, size: tuple = (72, 54)):
     """用 Pillow 生成 CTkImage 缩略图。加载失败返回 None。"""
     try:
@@ -1347,9 +1352,11 @@ class WXSenderApp:
         self._do_send(text, on_confirm=lambda: self.custom_input.delete("1.0", "end"))
 
     def _do_send(self, phrase, on_confirm=None):
-        """打开发送预览，确认后发送话术（str 或 list of blocks）。"""
+        """主界面发送不再弹出预览，直接执行发送。"""
         blocks = normalize_phrase(phrase)
-        self._open_send_preview(blocks, on_confirm=on_confirm)
+        if on_confirm:
+            on_confirm()
+        self._send_blocks_async(prepare_direct_send_blocks(blocks))
 
     def _open_send_preview(self, blocks: list, on_confirm=None):
         variables = extract_variables(blocks)

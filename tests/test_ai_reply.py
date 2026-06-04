@@ -82,8 +82,10 @@ class GenerateReplyTests(unittest.TestCase):
         run_mock.return_value = subprocess.CompletedProcess(
             args=["mc"], returncode=0, stdout="\n", stderr=""
         )
-        with self.assertRaises(AIEmptyResponseError):
-            generate_reply([{"content": "客户：在吗"}])
+        with self.assertRaises(AIEmptyResponseError) as ctx:
+            generate_reply([{"content": "客户：在吗"}], AIReplyConfig(command="mc"))
+        self.assertIn("AI 命令没有输出", str(ctx.exception))
+        self.assertIn("mc --code -p", str(ctx.exception))
 
 
 if __name__ == "__main__":

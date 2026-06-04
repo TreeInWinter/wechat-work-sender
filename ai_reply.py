@@ -100,5 +100,8 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
 
     reply = (result.stdout or "").strip()
     if not reply:
-        raise AIEmptyResponseError("AI 返回内容为空")
+        visible_cmd = " ".join([config.command, *config.args])
+        raise AIEmptyResponseError(
+            f"AI 命令没有输出，请在终端确认可用：{visible_cmd} \"只输出两个字：可以\""
+        )
     return reply

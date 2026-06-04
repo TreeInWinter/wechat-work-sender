@@ -15,7 +15,7 @@ macOS 辅助工具，通过 Accessibility API（AX API）自动化企业微信�
 - **GUI**：CustomTkinter 5.2.x（不是原生 tkinter）
 - **macOS 集成**：pyobjc-framework-{Cocoa, Quartz, ApplicationServices}
 - **图片处理**：Pillow（缩略图，`uv pip install Pillow`）
-- **Python**：3.13，venv 用 `uv` 管理（`.venv/bin/python`）
+- **Python**：3.10+ 且带 Tk 支持，当前推荐 Miniconda 3.13，venv 用 `uv` 管理（`.venv/bin/python`）
 - **远端仓库**：`ssh://git@git.sankuai.com/~baijinshan/wechat_work_sender.git`（美团内部）
 
 ---
@@ -205,8 +205,8 @@ docs/
 
 9. **个人版基础体验（2026-05-28）**：`codex-personal-basics-weeks-1-2` 分支补齐搜索、快捷键、变量模板、发送预览、权限引导和安装包。
    - 搜索只过滤当前分组，`⌘1` 到 `⌘9` 发送当前可见结果。
-   - 发送统一先进入预览弹窗；自定义消息确认发送后才清空输入框。
-   - 模板变量格式为 `{{变量名}}`；`{{日期}}`、`{{时间}}`、`{{星期}}` 为内置变量，发送预览中自动替换。
+   - 主界面发送直接执行，不再弹出发送预览；自定义消息触发发送后清空输入框。
+   - 模板变量格式为 `{{变量名}}`；`{{日期}}`、`{{时间}}`、`{{星期}}` 为内置变量，主界面发送时自动替换；未填写的自定义变量保留原占位符。
    - 打包脚本优先使用 `uv pip install`，找不到 `uv` 时降级为 `.venv/bin/python -m pip install`。
    - `build/` 与 `dist/` 是本地构建产物，已加入 `.gitignore`；验证产物为 `dist/wechat-sender.dmg`。
 
