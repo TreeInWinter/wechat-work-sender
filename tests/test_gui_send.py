@@ -5,6 +5,9 @@ from unittest.mock import patch
 
 
 def _install_gui_panel_import_stubs():
+    # customtkinter: stub only if not already installed (e.g. headless CI without display).
+    # On macOS developer machines customtkinter is available; the stub below is a
+    # safety net that avoids display-initialisation errors in truly headless environments.
     ctk = types.ModuleType("customtkinter")
 
     class DummyWidget:
@@ -17,52 +20,24 @@ def _install_gui_panel_import_stubs():
     ctk.set_default_color_theme = lambda *_args, **_kwargs: None
     sys.modules.setdefault("customtkinter", ctk)
 
-    appkit = types.ModuleType("AppKit")
-    appkit.NSWorkspace = object
-    sys.modules.setdefault("AppKit", appkit)
-
-    app_services = types.ModuleType("ApplicationServices")
-    for name in (
-        "AXUIElementCreateApplication",
-        "AXUIElementCopyAttributeValue",
-        "AXValueGetValue",
-        "AXIsProcessTrusted",
-    ):
-        setattr(app_services, name, lambda *_args, **_kwargs: None)
-    for name in (
-        "kAXWindowsAttribute",
-        "kAXPositionAttribute",
-        "kAXSizeAttribute",
-        "kAXValueCGPointType",
-        "kAXValueCGSizeType",
-    ):
-        setattr(app_services, name, name)
-    sys.modules.setdefault("ApplicationServices", app_services)
-
+    # sender: stub to avoid importing sender.py (which imports AppKit at top-level and
+    # performs side-effects).  The real AppKit/ApplicationServices/Quartz frameworks are
+    # available on macOS and must NOT be stubbed — doing so would pollute sys.modules
+    # with incomplete mocks and break tests in other modules (test_ax_helpers,
+    # test_im_clients) that rely on patching attributes of the real modules.
     sender = types.ModuleType("sender")
     sender.send_blocks = lambda *_args, **_kwargs: None
     sender.send_blocks_single = lambda *_args, **_kwargs: None
     sender.is_wx_running = lambda: False
     sender.read_chat_messages = lambda max_messages=30: []
+    sender.activate_wx = lambda: True
+    sender.render_blocks_to_image = lambda *_args, **_kwargs: None
 
     class NoChatWindowError(Exception):
         pass
 
     sender.NoChatWindowError = NoChatWindowError
     sys.modules.setdefault("sender", sender)
-
-    im_base = types.ModuleType("im_clients.base")
-
-    class UnsupportedClientAction(Exception):
-        pass
-
-    im_base.UnsupportedClientAction = UnsupportedClientAction
-    sys.modules.setdefault("im_clients.base", im_base)
-
-    im_registry = types.ModuleType("im_clients.registry")
-    im_registry.discover_clients = lambda: []
-    im_registry.choose_default_client = lambda clients: clients[0] if clients else None
-    sys.modules.setdefault("im_clients.registry", im_registry)
 
 
 _install_gui_panel_import_stubs()
