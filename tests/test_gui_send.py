@@ -51,6 +51,19 @@ def _install_gui_panel_import_stubs():
     sender.NoChatWindowError = NoChatWindowError
     sys.modules.setdefault("sender", sender)
 
+    im_base = types.ModuleType("im_clients.base")
+
+    class UnsupportedClientAction(Exception):
+        pass
+
+    im_base.UnsupportedClientAction = UnsupportedClientAction
+    sys.modules.setdefault("im_clients.base", im_base)
+
+    im_registry = types.ModuleType("im_clients.registry")
+    im_registry.discover_clients = lambda: []
+    im_registry.choose_default_client = lambda clients: clients[0] if clients else None
+    sys.modules.setdefault("im_clients.registry", im_registry)
+
 
 _install_gui_panel_import_stubs()
 import gui_panel
@@ -81,6 +94,39 @@ class PrepareDirectSendBlocksTests(unittest.TestCase):
         rendered = gui_panel.prepare_direct_send_blocks(blocks)
 
         self.assertEqual(rendered, [{"type": "text", "content": "您好 {{客户名}}"}])
+
+
+class ClientRoutingTests(unittest.TestCase):
+    def test_send_blocks_with_client_routes_to_selected_adapter(self):
+        calls = []
+
+        class Adapter:
+            def send_blocks(self, blocks):
+                calls.append(blocks)
+                return True
+
+        class Client:
+            adapter = Adapter()
+
+        blocks = [{"type": "text", "content": "您好"}]
+
+        result = gui_panel.send_blocks_with_client(Client(), blocks)
+
+        self.assertTrue(result)
+        self.assertEqual(calls, [blocks])
+
+    def test_read_chat_with_client_routes_to_selected_adapter(self):
+        class Adapter:
+            def read_chat_messages(self, max_messages=20):
+                return [{"content": f"{max_messages}条", "time": None}]
+
+        class Client:
+            adapter = Adapter()
+
+        self.assertEqual(
+            gui_panel.read_chat_with_client(Client(), max_messages=8),
+            [{"content": "8条", "time": None}],
+        )
 
 
 if __name__ == "__main__":

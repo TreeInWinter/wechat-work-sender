@@ -31,7 +31,9 @@ from ApplicationServices import (
     AXIsProcessTrusted,
 )
 
-from sender import send_blocks, send_blocks_single, is_wx_running, NoChatWindowError, read_chat_messages
+from sender import NoChatWindowError
+from im_clients.base import UnsupportedClientAction
+from im_clients.registry import choose_default_client, discover_clients
 from ai_reply import (
     AICommandFailedError,
     AICommandNotFoundError,
@@ -208,6 +210,20 @@ def render_template_blocks(blocks: list, values: dict[str, str]) -> list:
 def prepare_direct_send_blocks(blocks: list) -> list:
     """主界面直接发送前渲染内置变量，不弹出发送预览。"""
     return render_template_blocks(blocks, {})
+
+
+def send_blocks_with_client(client, blocks: list) -> bool:
+    """通过当前接管对象发送话术块。"""
+    if client is None:
+        raise UnsupportedClientAction("请先选择接管对象")
+    return client.adapter.send_blocks(blocks)
+
+
+def read_chat_with_client(client, max_messages: int = 20) -> list[dict]:
+    """通过当前接管对象读取聊天内容。"""
+    if client is None:
+        raise UnsupportedClientAction("请先选择接管对象")
+    return client.adapter.read_chat_messages(max_messages=max_messages)
 
 
 def make_thumbnail(path: str, size: tuple = (72, 54)):
@@ -687,8 +703,12 @@ class WXSenderApp:
         self.mode_var = ctk.StringVar(value="phrases")
         self._ai_messages = []
         self._ai_generating = False
+        self.clients = discover_clients()
+        self.current_client = choose_default_client(self.clients)
+        self._client_label_to_id = {}
+        self.target_var = ctk.StringVar(value="")
 
-        bounds = get_wechat_window_bounds()
+        bounds = self._current_window_bounds()
         if bounds:
             wx, wy, ww, wh = bounds
             self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
@@ -722,7 +742,7 @@ class WXSenderApp:
                        corner_radius=8, fg_color="transparent",
                        hover_color=PRIMARY_H, text_color="white",
                        font=ctk.CTkFont(size=16),
-                       command=self._check_status).pack(side="right", padx=8)
+                       command=self._refresh_targets_and_status).pack(side="right", padx=8)
 
         ctk.CTkButton(status_frame, text="权限", width=48, height=30,
                        corner_radius=8, fg_color="transparent",
@@ -730,6 +750,24 @@ class WXSenderApp:
                        hover_color=PRIMARY_H, text_color="white",
                        font=ctk.CTkFont(size=11),
                        command=self._show_permission_guide).pack(side="right", padx=(0, 4))
+
+        self.target_menu = ctk.CTkOptionMenu(
+            status_frame,
+            values=["检测中"],
+            variable=self.target_var,
+            width=132,
+            height=30,
+            corner_radius=8,
+            fg_color="white",
+            button_color=PRIMARY_H,
+            button_hover_color=PRIMARY,
+            text_color="#333",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            dropdown_font=ctk.CTkFont(family="PingFang SC", size=11),
+            command=self._on_target_change,
+        )
+        self.target_menu.pack(side="right", padx=(0, 6))
+        self._refresh_client_menu()
 
         # ── 模式切换 ──
         self.mode_frame = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -880,6 +918,48 @@ class WXSenderApp:
         self._refresh_cards()
         self._check_status()
 
+    def _refresh_client_menu(self):
+        selected_id = self.current_client.client_id if self.current_client else None
+        self.clients = discover_clients()
+        if selected_id:
+            self.current_client = next(
+                (client for client in self.clients if client.client_id == selected_id),
+                None,
+            )
+        if self.current_client is None:
+            self.current_client = choose_default_client(self.clients)
+
+        self._client_label_to_id = {client.menu_label: client.client_id for client in self.clients}
+        labels = list(self._client_label_to_id.keys()) or ["无可用对象"]
+        self.target_menu.configure(values=labels)
+        if self.current_client:
+            self.target_var.set(self.current_client.menu_label)
+        elif labels:
+            self.target_var.set(labels[0])
+
+    def _on_target_change(self, label: str):
+        client_id = self._client_label_to_id.get(label)
+        if not client_id:
+            return
+        self.current_client = next(
+            (client for client in self.clients if client.client_id == client_id),
+            self.current_client,
+        )
+        self._last_bounds = None
+        self._check_status()
+
+    def _refresh_targets_and_status(self):
+        self._refresh_client_menu()
+        self._check_status()
+
+    def _current_window_bounds(self) -> tuple | None:
+        if not self.current_client:
+            return None
+        return self.current_client.adapter.window_bounds()
+
+    def _current_client_name(self) -> str:
+        return self.current_client.display_name if self.current_client else "当前接管对象"
+
     def _switch_mode(self, mode: str):
         self.mode_var.set(mode)
         if mode == "ai":
@@ -932,7 +1012,7 @@ class WXSenderApp:
         self.ai_regenerate_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         self.ai_status_label = ctk.CTkLabel(
-            self.ai_view, text="选中企业微信聊天后，读取会话并生成回复。",
+            self.ai_view, text="选中当前接管对象聊天后，读取会话并生成回复。",
             text_color="#8c8c8c", anchor="w",
             font=ctk.CTkFont(family="PingFang SC", size=11),
         )
@@ -1016,10 +1096,18 @@ class WXSenderApp:
             return
         self._ai_set_status("正在读取聊天内容...")
         self.ai_generate_btn.configure(state="disabled")
+        client = self.current_client
 
         def fetch():
-            msgs = read_chat_messages(max_messages=30)
-            self.root.after(0, lambda: self._ai_after_read(msgs))
+            try:
+                msgs = read_chat_with_client(client, max_messages=30)
+                self.root.after(0, lambda: self._ai_after_read(msgs))
+            except UnsupportedClientAction as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: self._ai_read_failed(msg))
+            except Exception as exc:
+                msg = f"读取失败: {exc}"
+                self.root.after(0, lambda: self._ai_read_failed(msg))
 
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -1027,11 +1115,16 @@ class WXSenderApp:
         self._ai_messages = msgs
         self.ai_generate_btn.configure(state="normal")
         if not msgs:
-            self._ai_set_context("未读取到消息，请先在企业微信中选中聊天窗口。")
+            self._ai_set_context(f"未读取到消息，请先在{self._current_client_name()}中选中聊天窗口。")
             self._ai_set_status("未读取到聊天内容")
             return
         self._ai_set_context(self._format_ai_messages(msgs))
         self._ai_generate_async(msgs)
+
+    def _ai_read_failed(self, message: str):
+        self.ai_generate_btn.configure(state="normal")
+        self._ai_set_context(message)
+        self._ai_set_status(message)
 
     def _ai_regenerate(self):
         if self._ai_generating:
@@ -1170,7 +1263,7 @@ class WXSenderApp:
 
     def _poll_snap(self):
         """每 100ms 直接在主线程读取窗口坐标（AX API 调用 <5ms，无需后台线程）"""
-        bounds = get_wechat_window_bounds()
+        bounds = self._current_window_bounds()
         if bounds and bounds != self._last_bounds:
             self._last_bounds = bounds
             wx, wy, ww, wh = bounds
@@ -1178,23 +1271,34 @@ class WXSenderApp:
         self.root.after(100, self._poll_snap)
 
     def _check_status(self):
-        """检查企业微信状态"""
+        """检查当前接管对象状态"""
+        client = self.current_client
+
         def check():
-            running = is_wx_running()
-            self.root.after(0, lambda: self._update_status(running))
+            running = client.adapter.is_running() if client else False
+            self.root.after(0, lambda: self._update_status(client, running))
 
         threading.Thread(target=check, daemon=True).start()
 
-    def _update_status(self, running: bool):
+    def _update_status(self, client, running: bool):
         if not AXIsProcessTrusted():
             self.status_dot.configure(text_color=DOT_WAIT)
             self.status_label.configure(text="需要辅助功能权限")
-        elif running:
+        elif client is None:
+            self.status_dot.configure(text_color=DOT_ERR)
+            self.status_label.configure(text="未选择接管对象")
+        elif running and client.capabilities.verified:
             self.status_dot.configure(text_color=DOT_OK)
-            self.status_label.configure(text="企业微信已连接")
+            self.status_label.configure(text=f"{client.display_name}已连接")
+        elif running:
+            self.status_dot.configure(text_color=DOT_WAIT)
+            self.status_label.configure(text=f"{client.display_name}待验证")
+        elif client.installed:
+            self.status_dot.configure(text_color=DOT_ERR)
+            self.status_label.configure(text=f"{client.display_name}未运行")
         else:
             self.status_dot.configure(text_color=DOT_ERR)
-            self.status_label.configure(text="企业微信未运行")
+            self.status_label.configure(text=f"{client.display_name}未安装")
 
     def _open_accessibility_settings(self):
         subprocess.run(
@@ -1497,15 +1601,18 @@ class WXSenderApp:
 
     def _send_blocks_async(self, blocks: list):
         """确认后实际发送。纯文本沿用原链路；含图片渲染为一张图片保证单条消息。"""
+        client = self.current_client
 
         def send_task():
             try:
-                if has_images(blocks):
-                    send_blocks_single(blocks)
-                else:
-                    send_blocks(blocks)
+                send_blocks_with_client(client, blocks)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
                 self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
+            except UnsupportedClientAction as e:
+                msg = str(e)
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
+                self.root.after(0, lambda: self.status_label.configure(text="接管能力待验证"))
             except NoChatWindowError as e:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
@@ -1524,12 +1631,22 @@ class WXSenderApp:
         threading.Thread(target=send_task, daemon=True).start()
 
     def _read_chat(self):
-        """读取企业微信当前聊天内容并弹窗展示"""
+        """读取当前接管对象的聊天内容并弹窗展示"""
         self.status_label.configure(text="⏳ 读取中...")
+        client = self.current_client
 
         def fetch():
-            msgs = read_chat_messages(max_messages=30)
-            self.root.after(0, lambda: self._show_chat_popup(msgs))
+            try:
+                msgs = read_chat_with_client(client, max_messages=30)
+                self.root.after(0, lambda: self._show_chat_popup(msgs))
+            except UnsupportedClientAction as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_label.configure(text="接管能力待验证"))
+            except Exception as exc:
+                msg = f"读取失败: {exc}"
+                self.root.after(0, lambda: self._show_warning(msg))
+                self.root.after(0, lambda: self.status_label.configure(text="❌ 读取失败"))
 
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -1559,7 +1676,7 @@ class WXSenderApp:
         text_widget.pack(fill="both", expand=True, padx=10, pady=10)
 
         if not msgs:
-            text_widget.insert("end", "未读取到消息，请先在企业微信中选中聊天窗口。")
+            text_widget.insert("end", f"未读取到消息，请先在{self._current_client_name()}中选中聊天窗口。")
         else:
             for m in msgs:
                 time_str = f"[{m['time']}]  " if m['time'] else ""

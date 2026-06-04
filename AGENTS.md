@@ -158,6 +158,7 @@ content = raw[:half] if half and raw[:half] == raw[half:] else raw
 ```
 gui_panel.py      # CustomTkinter GUI（BlockEditor、PhraseCard、发送逻辑）
 sender.py         # 核心：send_message/send_image/send_blocks/AX API/read_chat
+im_clients/       # 即时通讯客户端适配器（企业微信/微信/大象隔离）
 phrases.json      # 话术数据（用户数据）
 build.spec        # PyInstaller 打包配置（arm64）
 build.sh          # 一键打包脚本（输出 dist/wechat-sender.dmg ~31MB）
@@ -182,6 +183,7 @@ docs/
 | `feature/rich-text` | 活跃 | 图文混排全功能（BlockEditor、send_blocks）|
 | `feature/macos-installer` | 未合并 | macOS .dmg 安装包 |
 | `feature/sync-minimize` | 未合并 | 同步最小化（已 revert，含文档）|
+| `codex/im-target-selection` | 活跃 | 发现 macOS 已安装 IM 客户端，选择当前接管对象 |
 
 ---
 
@@ -209,6 +211,13 @@ docs/
    - 模板变量格式为 `{{变量名}}`；`{{日期}}`、`{{时间}}`、`{{星期}}` 为内置变量，主界面发送时自动替换；未填写的自定义变量保留原占位符。
    - 打包脚本优先使用 `uv pip install`，找不到 `uv` 时降级为 `.venv/bin/python -m pip install`。
    - `build/` 与 `dist/` 是本地构建产物，已加入 `.gitignore`；验证产物为 `dist/wechat-sender.dmg`。
+
+10. **多 IM 接管对象（2026-06-04）**：`codex/im-target-selection` 分支新增 `im_clients/` 适配器层。
+   - 注册表只展示有适配器的对象，第一批为企业微信、微信、大象。
+   - 企业微信适配器复用现有 `sender.py` 可靠发送/读取链路，仍是默认目标。
+   - 微信和大象第一版只做安装/运行发现、激活和窗口边界读取；发送/读取聊天标记为待验证，不能误发。
+   - GUI 顶部“接管对象”下拉决定状态检测、窗口吸附、读取聊天和发送路由。
+   - 不同 IM 的 AX 树、进程名、bundle id 必须留在各自适配器文件中，不要写回 `gui_panel.py`。
 
 ---
 

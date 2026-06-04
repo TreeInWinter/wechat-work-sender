@@ -1,0 +1,2 @@
+"""Instant messaging client adapters."""
+
