@@ -1,0 +1,110 @@
+# tests/test_ax_helpers.py
+import unittest
+from unittest.mock import MagicMock, patch
+import subprocess
+
+
+class GetRunningAppTests(unittest.TestCase):
+    @patch("im_clients.ax_helpers.NSWorkspace")
+    def test_returns_app_when_found(self, ws_mock):
+        app = MagicMock()
+        app.localizedName.return_value = "微信"
+        ws_mock.sharedWorkspace.return_value.runningApplications.return_value = [app]
+
+        from im_clients.ax_helpers import get_running_app
+        result = get_running_app("微信")
+
+        self.assertIs(result, app)
+
+    @patch("im_clients.ax_helpers.NSWorkspace")
+    def test_returns_none_when_not_found(self, ws_mock):
+        ws_mock.sharedWorkspace.return_value.runningApplications.return_value = []
+
+        from im_clients.ax_helpers import get_running_app
+        result = get_running_app("微信")
+
+        self.assertIsNone(result)
+
+
+class IsAppRunningTests(unittest.TestCase):
+    @patch("im_clients.ax_helpers.get_running_app", return_value=MagicMock())
+    def test_returns_true_when_app_found(self, _):
+        from im_clients.ax_helpers import is_app_running
+        self.assertTrue(is_app_running("微信"))
+
+    @patch("im_clients.ax_helpers.get_running_app", return_value=None)
+    def test_returns_false_when_app_not_found(self, _):
+        from im_clients.ax_helpers import is_app_running
+        self.assertFalse(is_app_running("微信"))
+
+
+class ActivateAppTests(unittest.TestCase):
+    @patch("im_clients.ax_helpers.get_running_app")
+    def test_activates_app_and_returns_true(self, get_app_mock):
+        app = MagicMock()
+        get_app_mock.return_value = app
+
+        from im_clients.ax_helpers import activate_app
+        result = activate_app("微信")
+
+        self.assertTrue(result)
+        app.activateWithOptions_.assert_called_once()
+
+    @patch("im_clients.ax_helpers.get_running_app", return_value=None)
+    def test_returns_false_when_not_running(self, _):
+        from im_clients.ax_helpers import activate_app
+        self.assertFalse(activate_app("微信"))
+
+
+class SetClipboardTextTests(unittest.TestCase):
+    @patch("im_clients.ax_helpers.NSPasteboard")
+    def test_writes_string_to_pasteboard(self, pb_mock):
+        pb = MagicMock()
+        pb_mock.generalPasteboard.return_value = pb
+
+        from im_clients.ax_helpers import set_clipboard_text
+        set_clipboard_text("hello")
+
+        pb.clearContents.assert_called_once()
+        pb.setString_forType_.assert_called_once()
+        args = pb.setString_forType_.call_args.args
+        self.assertEqual(args[0], "hello")
+
+
+class PasteAndSendTests(unittest.TestCase):
+    @patch("im_clients.ax_helpers.subprocess.run")
+    @patch("im_clients.ax_helpers.CGEventPost")
+    @patch("im_clients.ax_helpers.CGEventCreateKeyboardEvent")
+    @patch("im_clients.ax_helpers.CGEventSetFlags")
+    def test_paste_triggers_cmd_v_and_applescript_enter(
+        self, _flags, _create, post_mock, run_mock
+    ):
+        run_mock.return_value = subprocess.CompletedProcess([], 0)
+
+        from im_clients.ax_helpers import paste_and_send
+        paste_and_send(app_name="微信", delay=0)
+
+        # Cmd+V 触发了 CGEventPost（至少 2 次：key down + key up）
+        self.assertGreaterEqual(post_mock.call_count, 2)
+        # AppleScript Enter 被调用
+        run_mock.assert_called_once()
+        script_arg = run_mock.call_args.args[0]
+        self.assertIn("osascript", script_arg)
+
+
+class DedupAxValueTests(unittest.TestCase):
+    def test_deduplicates_repeated_string(self):
+        from im_clients.ax_helpers import _dedup_ax_value
+        self.assertEqual(_dedup_ax_value("你好你好"), "你好")
+
+    def test_leaves_non_duplicated_string_unchanged(self):
+        from im_clients.ax_helpers import _dedup_ax_value
+        self.assertEqual(_dedup_ax_value("你好"), "你好")
+
+    def test_empty_string_unchanged(self):
+        from im_clients.ax_helpers import _dedup_ax_value
+        self.assertEqual(_dedup_ax_value(""), "")
+
+
+if __name__ == "__main__":
+    unittest.main()
