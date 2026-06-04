@@ -20,7 +20,7 @@ class IMClientDiscoveryTests(unittest.TestCase):
         self.assertTrue(by_id["wechat"].installed)
         self.assertTrue(by_id["daxiang"].installed)
         self.assertTrue(by_id["wechat_work"].capabilities.can_send)
-        self.assertFalse(by_id["wechat"].capabilities.can_send)
+        self.assertTrue(by_id["wechat"].capabilities.can_send)
         self.assertFalse(by_id["daxiang"].capabilities.can_read_chat)
 
     def test_marks_running_state_independently_from_installed_state(self):
@@ -61,16 +61,16 @@ class IMClientDiscoveryTests(unittest.TestCase):
 
 
 class IMClientAdapterTests(unittest.TestCase):
-    def test_unverified_adapter_blocks_send(self):
+    def test_unverified_adapter_blocks_send_daxiang_still_raises(self):
         clients = discover_clients(
             [
-                ApplicationInfo(name="微信", bundle_id="com.tencent.xinWeChat", running=True, pid=1234),
+                ApplicationInfo(name="大象", bundle_id="com.sankuai.daxiang", running=True, pid=1234),
             ]
         )
-        wechat = next(client for client in clients if client.client_id == "wechat")
+        daxiang = next(client for client in clients if client.client_id == "daxiang")
 
         with self.assertRaises(UnsupportedClientAction):
-            wechat.adapter.send_blocks([{"type": "text", "content": "hello"}])
+            daxiang.adapter.send_blocks([{"type": "text", "content": "hello"}])
 
     @patch("im_clients.wechat_work.sender")
     def test_enterprise_wechat_adapter_delegates_to_existing_sender(self, sender_mock):
@@ -100,9 +100,9 @@ class IMClientAdapterTests(unittest.TestCase):
         adapter = next(
             client.adapter
             for client in discover_clients(
-                [ApplicationInfo(name="微信", bundle_id="com.tencent.xinWeChat", running=True, pid=1234)]
+                [ApplicationInfo(name="大象", bundle_id="com.sankuai.daxiang", running=True, pid=1234)]
             )
-            if client.client_id == "wechat"
+            if client.client_id == "daxiang"
         )
         adapter.set_runtime_app_provider(lambda: running_app)
         adapter.set_window_bounds_provider(lambda: (1, 2, 3, 4))
@@ -110,6 +110,60 @@ class IMClientAdapterTests(unittest.TestCase):
         self.assertTrue(adapter.activate())
         self.assertEqual(adapter.window_bounds(), (1, 2, 3, 4))
         running_app.activateWithOptions_.assert_called_once()
+
+
+class WechatAdapterSendTests(unittest.TestCase):
+    @patch("im_clients.wechat.is_app_running", return_value=False)
+    def test_send_blocks_returns_false_when_not_running(self, _):
+        from im_clients.wechat import WechatAdapter
+        adapter = WechatAdapter()
+        result = adapter.send_blocks([{"type": "text", "content": "hello"}])
+        self.assertFalse(result)
+
+    @patch("im_clients.wechat.activate_app", return_value=True)
+    @patch("im_clients.wechat.is_app_running", return_value=True)
+    @patch("im_clients.wechat.get_ax_element")
+    @patch("im_clients.wechat.focus_input", return_value=True)
+    @patch("im_clients.wechat.get_clipboard_text", return_value="")
+    @patch("im_clients.wechat.paste_and_send")
+    @patch("im_clients.wechat.set_clipboard_text")
+    def test_send_text_calls_clipboard_and_paste(
+        self, set_clip, paste_mock, get_clip, focus, ax_el, running, activate
+    ):
+        from im_clients.wechat import WechatAdapter
+        adapter = WechatAdapter()
+        result = adapter.send_blocks([{"type": "text", "content": "你好"}])
+        self.assertTrue(result)
+        set_clip.assert_any_call("你好")
+        paste_mock.assert_called_once()
+
+    @patch("im_clients.wechat.activate_app", return_value=True)
+    @patch("im_clients.wechat.is_app_running", return_value=True)
+    @patch("im_clients.wechat.get_ax_element")
+    @patch("im_clients.wechat.focus_input", return_value=False)
+    def test_send_raises_when_no_chat_window(self, focus, ax_el, running, activate):
+        from im_clients.base import UnsupportedClientAction
+        from im_clients.wechat import WechatAdapter
+        adapter = WechatAdapter()
+        with self.assertRaises(UnsupportedClientAction):
+            adapter.send_blocks([{"type": "text", "content": "你好"}])
+
+    @patch("im_clients.wechat.is_app_running", return_value=False)
+    def test_read_chat_returns_empty_when_not_running(self, _):
+        from im_clients.wechat import WechatAdapter
+        adapter = WechatAdapter()
+        result = adapter.read_chat_messages()
+        self.assertEqual(result, [])
+
+    @patch("im_clients.wechat.activate_app", return_value=True)
+    @patch("im_clients.wechat.is_app_running", return_value=True)
+    @patch("im_clients.wechat.get_ax_element")
+    @patch("im_clients.wechat.bfs_find_msg_table", return_value=None)
+    def test_read_chat_returns_empty_when_no_table(self, table, ax_el, running, activate):
+        from im_clients.wechat import WechatAdapter
+        adapter = WechatAdapter()
+        result = adapter.read_chat_messages()
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":
