@@ -45,6 +45,18 @@ class DaxiangAdapter(IMClientAdapter):
     # 大象实际进程名可能为 "大象" 或 "Daxiang"，真机探测后确认
     _PROCESS_NAME = "大象"
 
+    def is_running(self) -> bool:
+        for name in self.app_names:
+            if is_app_running(name):
+                return True
+        return False
+
+    def activate(self) -> bool:
+        for name in self.app_names:
+            if is_app_running(name):
+                return activate_app(name)
+        return False
+
     def _get_app_name(self) -> str | None:
         """返回当前正在运行的 app_name（用于 AX 查找）。"""
         for name in self.app_names:
