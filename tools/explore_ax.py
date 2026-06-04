@@ -40,7 +40,10 @@ def explore(app_name: str, max_depth: int = 12):
         sys.exit(1)
 
     ax = AXUIElementCreateApplication(pid)
-    _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+    err, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+    if err != 0:
+        print(f"[错误] 无法读取「{app_name}」窗口（AX错误码={err}），请检查辅助功能权限。")
+        sys.exit(1)
     if not windows:
         print(f"[错误] 未找到「{app_name}」的窗口，请确保主窗口已打开。")
         sys.exit(1)
@@ -70,7 +73,7 @@ def explore(app_name: str, max_depth: int = 12):
                 else:
                     marker = "  ← 消息历史（有值，只读）"
             elif role_str == "AXTable":
-                marker = "  ← 候选消息历史容器"
+                marker = "  ← AXTable（可能是消息历史容器或会话列表）"
 
             print(f"depth={d:<4} {role_str:<24} {val_preview}{marker}")
 
@@ -78,8 +81,8 @@ def explore(app_name: str, max_depth: int = 12):
             if children:
                 for child in children:
                     queue.append((child, d + 1))
-        except Exception:
-            pass
+        except Exception as e:
+            pass  # AX 元素可能在遍历中失效，静默跳过
 
     print(f"\n共遍历 {total} 个节点（max_depth={max_depth}）")
     print("\n提示：")
@@ -92,5 +95,12 @@ if __name__ == "__main__":
         print(__doc__)
         sys.exit(1)
     app_name = sys.argv[1]
-    max_depth = int(sys.argv[2]) if len(sys.argv) > 2 else 12
+    if len(sys.argv) > 2:
+        try:
+            max_depth = int(sys.argv[2])
+        except ValueError:
+            print(f"[错误] max_depth 必须是整数，收到：{sys.argv[2]!r}")
+            sys.exit(1)
+    else:
+        max_depth = 12
     explore(app_name, max_depth)
