@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections import deque
 
 from AppKit import (
     NSApplicationActivateIgnoringOtherApps,
@@ -84,8 +85,6 @@ def bfs_find_input(ax_root, max_depth: int = 10):
     BFS 优先命中最浅节点，避免先深入消息历史区找到只读的 AXTextArea。
     返回找到的 AX 元素，未找到返回 None。
     """
-    from collections import deque
-
     queue = deque([(ax_root, 0)])
     while queue:
         el, depth = queue.popleft()
@@ -94,7 +93,9 @@ def bfs_find_input(ax_root, max_depth: int = 10):
         try:
             _, role = AXUIElementCopyAttributeValue(el, kAXRoleAttribute, None)
             if role == "AXTextArea":
-                return el
+                _, val = AXUIElementCopyAttributeValue(el, kAXValueAttribute, None)
+                if not val:   # value=None 表示空可写输入框
+                    return el
             _, children = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, None)
             if children:
                 for child in children:
@@ -124,8 +125,6 @@ def bfs_find_msg_table(ax_root, max_depth: int = 8):
     本函数找到第一个 depth >= 4 的 AXTable 即返回，适配不同 app。
     若探测后发现 depth 固定，可在 adapter 中传入更精确的 max_depth。
     """
-    from collections import deque
-
     queue = deque([(ax_root, 0)])
     while queue:
         el, d = queue.popleft()
@@ -178,7 +177,7 @@ def set_clipboard_png(image_path: str):
     if png_data:
         pb.setData_forType_(png_data, "public.png")
     else:
-        pb.writeObjects_([image])  # 兜底：写 TIFF
+        raise ValueError(f"无法将图片转换为 PNG 格式：{image_path}")
 
 
 # ── 键盘操作 ───────────────────────────────────────────────────
@@ -252,7 +251,7 @@ def read_messages_from_table(table_element, max_messages: int = 20) -> list[dict
             if content:
                 messages.append({"content": content, "time": time_str})
     except Exception:
-        pass
+        pass  # AXTable 或 rows 迭代失效时静默返回已收集的消息
     return messages[-max_messages:]
 
 

@@ -106,5 +106,121 @@ class DedupAxValueTests(unittest.TestCase):
         self.assertEqual(_dedup_ax_value(""), "")
 
 
+class BfsFindInputTests(unittest.TestCase):
+    def _make_ax_tree(self, roles_and_values):
+        """
+        构造简单 AX 树：roles_and_values 是 [(role, value), ...] 列表，
+        按顺序构造父子链：root -> child[0] -> child[1] -> ...
+        返回根节点 mock。
+        """
+        nodes = []
+        for role, val in roles_and_values:
+            node = MagicMock()
+            node._role = role
+            node._val = val
+            nodes.append(node)
+
+        def ax_attr(el, attr, _):
+            from ApplicationServices import kAXRoleAttribute, kAXValueAttribute, kAXChildrenAttribute
+            if attr == kAXRoleAttribute:
+                return (None, el._role)
+            if attr == kAXValueAttribute:
+                return (None, el._val)
+            if attr == kAXChildrenAttribute:
+                idx = nodes.index(el)
+                if idx + 1 < len(nodes):
+                    return (None, [nodes[idx + 1]])
+                return (None, None)
+            return (None, None)
+
+        return nodes[0], ax_attr
+
+    @patch("im_clients.ax_helpers.AXUIElementCopyAttributeValue")
+    def test_finds_empty_textarea_as_input(self, ax_mock):
+        root, ax_attr = self._make_ax_tree([
+            ("AXWindow", None),
+            ("AXGroup", None),
+            ("AXTextArea", None),  # 候选输入框：value=None
+        ])
+        ax_mock.side_effect = ax_attr
+
+        from im_clients.ax_helpers import bfs_find_input
+        result = bfs_find_input(root)
+
+        self.assertIsNotNone(result)
+
+    @patch("im_clients.ax_helpers.AXUIElementCopyAttributeValue")
+    def test_skips_textarea_with_content(self, ax_mock):
+        root, ax_attr = self._make_ax_tree([
+            ("AXWindow", None),
+            ("AXTextArea", "有内容的只读消息"),  # 消息历史，应跳过
+        ])
+        ax_mock.side_effect = ax_attr
+
+        from im_clients.ax_helpers import bfs_find_input
+        result = bfs_find_input(root)
+
+        self.assertIsNone(result)
+
+    @patch("im_clients.ax_helpers.AXUIElementCopyAttributeValue")
+    def test_returns_none_when_no_textarea(self, ax_mock):
+        root, ax_attr = self._make_ax_tree([
+            ("AXWindow", None),
+            ("AXGroup", None),
+        ])
+        ax_mock.side_effect = ax_attr
+
+        from im_clients.ax_helpers import bfs_find_input
+        result = bfs_find_input(root)
+
+        self.assertIsNone(result)
+
+
+class GetAxElementTests(unittest.TestCase):
+    @patch("im_clients.ax_helpers.AXUIElementCreateApplication")
+    @patch("im_clients.ax_helpers.get_running_app")
+    def test_returns_ax_element_when_app_running(self, get_app_mock, ax_create_mock):
+        app = MagicMock()
+        app.processIdentifier.return_value = 1234
+        get_app_mock.return_value = app
+        ax_elem = MagicMock()
+        ax_create_mock.return_value = ax_elem
+
+        from im_clients.ax_helpers import get_ax_element
+        result = get_ax_element("微信")
+
+        self.assertIs(result, ax_elem)
+        ax_create_mock.assert_called_once_with(1234)
+
+    @patch("im_clients.ax_helpers.get_running_app", return_value=None)
+    def test_returns_none_when_app_not_running(self, _):
+        from im_clients.ax_helpers import get_ax_element
+        self.assertIsNone(get_ax_element("微信"))
+
+
+class GetClipboardTextTests(unittest.TestCase):
+    @patch("im_clients.ax_helpers.NSPasteboard")
+    def test_returns_clipboard_string(self, pb_mock):
+        pb = MagicMock()
+        pb.stringForType_.return_value = "hello"
+        pb_mock.generalPasteboard.return_value = pb
+
+        from im_clients.ax_helpers import get_clipboard_text
+        result = get_clipboard_text()
+
+        self.assertEqual(result, "hello")
+
+    @patch("im_clients.ax_helpers.NSPasteboard")
+    def test_returns_empty_string_when_no_content(self, pb_mock):
+        pb = MagicMock()
+        pb.stringForType_.return_value = None
+        pb_mock.generalPasteboard.return_value = pb
+
+        from im_clients.ax_helpers import get_clipboard_text
+        result = get_clipboard_text()
+
+        self.assertEqual(result, "")
+
+
 if __name__ == "__main__":
     unittest.main()
