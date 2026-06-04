@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""AI reply generation helpers for the WeCom sidebar."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import os
+import shutil
+import subprocess
+
+
+class AIReplyError(Exception):
+    """Base class for AI reply generation failures."""
+
+
+class AICommandNotFoundError(AIReplyError):
+    """AI command is not installed or not visible in PATH."""
+
+
+class AICommandTimeoutError(AIReplyError):
+    """AI command exceeded the configured timeout."""
+
+
+class AICommandFailedError(AIReplyError):
+    """AI command exited with a non-zero status."""
+
+
+class AIEmptyResponseError(AIReplyError):
+    """AI command returned no usable reply."""
+
+
+def resolve_ai_command() -> str:
+    found = shutil.which("mc")
+    if found:
+        return found
+    for path in ("/usr/local/bin/mc", "/opt/homebrew/bin/mc"):
+        if os.path.exists(path):
+            return path
+    return "mc"
+
+
+@dataclass
+class AIReplyConfig:
+    command: str = field(default_factory=resolve_ai_command)
+    args: list[str] = field(
+        default_factory=lambda: ["--code", "-p", "--tools", "", "--no-session-persistence"]
+    )
+    timeout: int = 60
+    max_messages: int = 20
+
+
+def _format_message(message: dict) -> str:
+    content = str(message.get("content", "")).strip()
+    time_str = message.get("time")
+    if time_str:
+        return f"[{time_str}] {content}"
+    return content
+
+
+def build_reply_prompt(messages: list[dict], max_messages: int = 20) -> str:
+    useful = [m for m in messages if str(m.get("content", "")).strip()]
+    selected = useful[-max_messages:]
+    transcript = "\n".join(_format_message(m) for m in selected)
+    return (
+        "你是企业微信客服回复助手。请根据下面最近的聊天记录，生成一段可以直接发给客户的中文回复。\n\n"
+        "要求：\n"
+        "1. 只输出最终回复正文，不要标题、解释、Markdown 或代码块。\n"
+        "2. 语气礼貌、简洁、专业。\n"
+        "3. 不要承诺无法从聊天记录确认的事实。\n"
+        "4. 如果信息不足，先表达已收到，并说明需要进一步确认。\n\n"
+        "最近聊天记录：\n"
+        f"{transcript}\n\n"
+        "请输出回复："
+    )
+
+
+def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) -> str:
+    config = config or AIReplyConfig()
+    if not any(str(m.get("content", "")).strip() for m in messages):
+        raise AIEmptyResponseError("没有可用于生成回复的聊天内容")
+
+    prompt = build_reply_prompt(messages, max_messages=config.max_messages)
+    cmd = [config.command, *config.args, prompt]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise AICommandNotFoundError(f"未找到 AI 命令: {config.command}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AICommandTimeoutError("AI 生成超时，请稍后重试") from exc
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        raise AICommandFailedError(err or f"AI 命令退出码: {result.returncode}")
+
+    reply = (result.stdout or "").strip()
+    if not reply:
+        raise AIEmptyResponseError("AI 返回内容为空")
+    return reply

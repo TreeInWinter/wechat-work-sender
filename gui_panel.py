@@ -32,6 +32,13 @@ from ApplicationServices import (
 )
 
 from sender import send_blocks, send_blocks_single, is_wx_running, NoChatWindowError, read_chat_messages
+from ai_reply import (
+    AICommandFailedError,
+    AICommandNotFoundError,
+    AICommandTimeoutError,
+    AIEmptyResponseError,
+    generate_reply,
+)
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -672,6 +679,9 @@ class WXSenderApp:
         self._selected_card = None  # 当前选中的卡片
         self._visible_phrases = []
         self._search_after_id = None
+        self.mode_var = ctk.StringVar(value="phrases")
+        self._ai_messages = []
+        self._ai_generating = False
 
         bounds = get_wechat_window_bounds()
         if bounds:
@@ -716,8 +726,33 @@ class WXSenderApp:
                        font=ctk.CTkFont(size=11),
                        command=self._show_permission_guide).pack(side="right", padx=(0, 4))
 
+        # ── 模式切换 ──
+        self.mode_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        self.mode_frame.pack(fill="x", padx=12, pady=(10, 4))
+        self.mode_frame.grid_columnconfigure((0, 1), weight=1)
+
+        self.phrase_mode_btn = ctk.CTkButton(
+            self.mode_frame, text="话术", height=30, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=lambda: self._switch_mode("phrases"),
+        )
+        self.phrase_mode_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        self.ai_mode_btn = ctk.CTkButton(
+            self.mode_frame, text="AI 助手", height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            command=lambda: self._switch_mode("ai"),
+        )
+        self.ai_mode_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        self.phrase_view = ctk.CTkFrame(self.root, fg_color="transparent")
+        self.phrase_view.pack(fill="both", expand=True)
+
         # ── 分组选择 ──
-        group_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        group_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
         group_frame.pack(fill="x", padx=12, pady=(10, 4))
 
         ctk.CTkLabel(group_frame, text="分组",
@@ -743,7 +778,7 @@ class WXSenderApp:
                        command=self._add_group).pack(side="right")
 
         # ── 搜索 ──
-        search_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        search_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
         search_frame.pack(fill="x", padx=12, pady=(0, 8))
         self.search_var = ctk.StringVar(value="")
         self.search_entry = ctk.CTkEntry(
@@ -768,7 +803,7 @@ class WXSenderApp:
 
         # ── 话术卡片列表 ──
         self.cards_frame = ctk.CTkScrollableFrame(
-            self.root, fg_color=PANEL_BG, corner_radius=0,
+            self.phrase_view, fg_color=PANEL_BG, corner_radius=0,
             scrollbar_button_color=PRIMARY,
             scrollbar_button_hover_color=PRIMARY_H,
         )
@@ -776,7 +811,7 @@ class WXSenderApp:
         self.cards_frame.grid_columnconfigure(0, weight=1)
 
         # ── 操作按钮 ──
-        btn_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        btn_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
         btn_frame.pack(fill="x", padx=12, pady=(0, 6))
         btn_frame.grid_columnconfigure((0, 1), weight=1)
 
@@ -797,11 +832,11 @@ class WXSenderApp:
         ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         # ── 分隔线 ──
-        ctk.CTkFrame(self.root, height=1, fg_color="#dce8ff", corner_radius=0).pack(
+        ctk.CTkFrame(self.phrase_view, height=1, fg_color="#dce8ff", corner_radius=0).pack(
             fill="x", padx=12, pady=(2, 8))
 
         # ── 自定义消息 ──
-        bottom_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        bottom_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
         bottom_frame.pack(fill="x", padx=12, pady=(0, 10))
 
         self.custom_input = ctk.CTkTextbox(
@@ -833,9 +868,230 @@ class WXSenderApp:
             font=ctk.CTkFont(family="PingFang SC", size=10),
         ).pack(fill="x", pady=(6, 0))
 
+        self.ai_view = ctk.CTkFrame(self.root, fg_color="transparent")
+        self._build_ai_view()
+
         # ── 初始化 ──
         self._refresh_cards()
         self._check_status()
+
+    def _switch_mode(self, mode: str):
+        self.mode_var.set(mode)
+        if mode == "ai":
+            self.phrase_view.pack_forget()
+            self.ai_view.pack(fill="both", expand=True)
+            self.phrase_mode_btn.configure(
+                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                text_color=PRIMARY, hover_color=CARD_BG,
+                font=ctk.CTkFont(family="PingFang SC", size=12),
+            )
+            self.ai_mode_btn.configure(
+                fg_color=PRIMARY, border_width=0, text_color="white",
+                hover_color=PRIMARY_H,
+                font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            )
+        else:
+            self.ai_view.pack_forget()
+            self.phrase_view.pack(fill="both", expand=True)
+            self.phrase_mode_btn.configure(
+                fg_color=PRIMARY, border_width=0, text_color="white",
+                hover_color=PRIMARY_H,
+                font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            )
+            self.ai_mode_btn.configure(
+                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                text_color=PRIMARY, hover_color=CARD_BG,
+                font=ctk.CTkFont(family="PingFang SC", size=12),
+            )
+
+    def _build_ai_view(self):
+        action_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        action_frame.pack(fill="x", padx=12, pady=(8, 6))
+        action_frame.grid_columnconfigure((0, 1), weight=1)
+
+        self.ai_generate_btn = ctk.CTkButton(
+            action_frame, text="读取并生成", height=34, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=self._ai_read_and_generate,
+        )
+        self.ai_generate_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        self.ai_regenerate_btn = ctk.CTkButton(
+            action_frame, text="重新生成", height=34, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            command=self._ai_regenerate,
+        )
+        self.ai_regenerate_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        self.ai_status_label = ctk.CTkLabel(
+            self.ai_view, text="选中企业微信聊天后，读取会话并生成回复。",
+            text_color="#8c8c8c", anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        self.ai_status_label.pack(fill="x", padx=14, pady=(0, 6))
+
+        ctk.CTkLabel(
+            self.ai_view, text="聊天上下文", anchor="w",
+            text_color="#333", font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+        ).pack(fill="x", padx=14, pady=(4, 4))
+
+        self.ai_context_box = ctk.CTkTextbox(
+            self.ai_view, height=140, corner_radius=8, border_width=1,
+            border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        self.ai_context_box.pack(fill="x", padx=12, pady=(0, 8))
+        self.ai_context_box.configure(state="disabled")
+
+        ctk.CTkLabel(
+            self.ai_view, text="候选回复", anchor="w",
+            text_color="#333", font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+        ).pack(fill="x", padx=14, pady=(4, 4))
+
+        self.ai_reply_box = ctk.CTkTextbox(
+            self.ai_view, height=160, corner_radius=8, border_width=1,
+            border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=12),
+        )
+        self.ai_reply_box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        utility_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        utility_frame.pack(fill="x", padx=12, pady=(0, 6))
+        utility_frame.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkButton(
+            utility_frame, text="复制", height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=self._ai_copy_reply,
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        ctk.CTkButton(
+            utility_frame, text="清空", height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=self._ai_clear_reply,
+        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        ctk.CTkButton(
+            self.ai_view, text="确认发送", height=36, corner_radius=10,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=self._ai_send_reply,
+        ).pack(fill="x", padx=12, pady=(0, 10))
+
+    def _ai_set_status(self, text: str):
+        self.ai_status_label.configure(text=text)
+
+    def _ai_set_context(self, text: str):
+        self.ai_context_box.configure(state="normal")
+        self.ai_context_box.delete("1.0", "end")
+        self.ai_context_box.insert("end", text)
+        self.ai_context_box.configure(state="disabled")
+
+    def _ai_set_reply(self, text: str):
+        self.ai_reply_box.delete("1.0", "end")
+        self.ai_reply_box.insert("end", text)
+
+    def _ai_get_reply(self) -> str:
+        return self.ai_reply_box.get("1.0", "end").strip()
+
+    def _format_ai_messages(self, msgs: list) -> str:
+        lines = []
+        for msg in msgs:
+            time_str = f"[{msg['time']}] " if msg.get("time") else ""
+            lines.append(f"{time_str}{msg.get('content', '')}")
+        return "\n\n".join(lines)
+
+    def _ai_read_and_generate(self):
+        if self._ai_generating:
+            return
+        self._ai_set_status("正在读取聊天内容...")
+        self.ai_generate_btn.configure(state="disabled")
+
+        def fetch():
+            msgs = read_chat_messages(max_messages=30)
+            self.root.after(0, lambda: self._ai_after_read(msgs))
+
+        threading.Thread(target=fetch, daemon=True).start()
+
+    def _ai_after_read(self, msgs: list):
+        self._ai_messages = msgs
+        self.ai_generate_btn.configure(state="normal")
+        if not msgs:
+            self._ai_set_context("未读取到消息，请先在企业微信中选中聊天窗口。")
+            self._ai_set_status("未读取到聊天内容")
+            return
+        self._ai_set_context(self._format_ai_messages(msgs))
+        self._ai_generate_async(msgs)
+
+    def _ai_regenerate(self):
+        if self._ai_generating:
+            return
+        if not self._ai_messages:
+            self._ai_read_and_generate()
+            return
+        self._ai_generate_async(self._ai_messages)
+
+    def _ai_generate_async(self, msgs: list):
+        self._ai_generating = True
+        self.ai_generate_btn.configure(state="disabled")
+        self.ai_regenerate_btn.configure(state="disabled")
+        self._ai_set_status("正在调用 AI 生成回复...")
+
+        def generate_task():
+            try:
+                reply = generate_reply(msgs)
+                self.root.after(0, lambda: self._ai_generation_done(reply))
+            except (
+                AICommandNotFoundError,
+                AICommandTimeoutError,
+                AICommandFailedError,
+                AIEmptyResponseError,
+            ) as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: self._ai_generation_failed(msg))
+            except Exception as exc:
+                msg = f"AI 生成失败: {exc}"
+                self.root.after(0, lambda: self._ai_generation_failed(msg))
+
+        threading.Thread(target=generate_task, daemon=True).start()
+
+    def _ai_generation_done(self, reply: str):
+        self._ai_generating = False
+        self.ai_generate_btn.configure(state="normal")
+        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_reply(reply)
+        self._ai_set_status("AI 回复已生成，可编辑后发送")
+
+    def _ai_generation_failed(self, message: str):
+        self._ai_generating = False
+        self.ai_generate_btn.configure(state="normal")
+        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_status(message)
+
+    def _ai_copy_reply(self):
+        reply = self._ai_get_reply()
+        if not reply:
+            self._show_warning("暂无可复制的回复")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(reply)
+        self._ai_set_status("候选回复已复制")
+
+    def _ai_clear_reply(self):
+        self._ai_set_reply("")
+        self._ai_set_status("候选回复已清空")
+
+    def _ai_send_reply(self):
+        reply = self._ai_get_reply()
+        if not reply:
+            self._show_warning("请先生成或输入回复内容")
+            return
+        self._do_send(reply)
 
     def _refresh_cards(self):
         for widget in self.cards_frame.winfo_children():
