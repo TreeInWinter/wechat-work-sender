@@ -21,7 +21,8 @@ class IMClientDiscoveryTests(unittest.TestCase):
         self.assertTrue(by_id["daxiang"].installed)
         self.assertTrue(by_id["wechat_work"].capabilities.can_send)
         self.assertTrue(by_id["wechat"].capabilities.can_send)
-        self.assertFalse(by_id["daxiang"].capabilities.can_read_chat)
+        self.assertTrue(by_id["daxiang"].capabilities.can_send)
+        self.assertTrue(by_id["daxiang"].capabilities.can_read_chat)
 
     def test_marks_running_state_independently_from_installed_state(self):
         apps = [
@@ -162,6 +163,60 @@ class WechatAdapterSendTests(unittest.TestCase):
     def test_read_chat_returns_empty_when_no_table(self, table, ax_el, running, activate):
         from im_clients.wechat import WechatAdapter
         adapter = WechatAdapter()
+        result = adapter.read_chat_messages()
+        self.assertEqual(result, [])
+
+
+class DaxiangAdapterSendTests(unittest.TestCase):
+    @patch("im_clients.daxiang.is_app_running", return_value=False)
+    def test_send_blocks_returns_false_when_not_running(self, _):
+        from im_clients.daxiang import DaxiangAdapter
+        adapter = DaxiangAdapter()
+        result = adapter.send_blocks([{"type": "text", "content": "hello"}])
+        self.assertFalse(result)
+
+    @patch("im_clients.daxiang.activate_app", return_value=True)
+    @patch("im_clients.daxiang.is_app_running", return_value=True)
+    @patch("im_clients.daxiang.get_ax_element")
+    @patch("im_clients.daxiang.focus_input", return_value=True)
+    @patch("im_clients.daxiang.get_clipboard_text", return_value="")
+    @patch("im_clients.daxiang.paste_and_send")
+    @patch("im_clients.daxiang.set_clipboard_text")
+    def test_send_text_calls_clipboard_and_paste(
+        self, set_clip, paste_mock, get_clip, focus, ax_el, running, activate
+    ):
+        from im_clients.daxiang import DaxiangAdapter
+        adapter = DaxiangAdapter()
+        result = adapter.send_blocks([{"type": "text", "content": "你好"}])
+        self.assertTrue(result)
+        set_clip.assert_any_call("你好")
+        paste_mock.assert_called_once()
+
+    @patch("im_clients.daxiang.activate_app", return_value=True)
+    @patch("im_clients.daxiang.is_app_running", return_value=True)
+    @patch("im_clients.daxiang.get_ax_element")
+    @patch("im_clients.daxiang.focus_input", return_value=False)
+    def test_send_raises_when_no_chat_window(self, focus, ax_el, running, activate):
+        from im_clients.base import UnsupportedClientAction
+        from im_clients.daxiang import DaxiangAdapter
+        adapter = DaxiangAdapter()
+        with self.assertRaises(UnsupportedClientAction):
+            adapter.send_blocks([{"type": "text", "content": "你好"}])
+
+    @patch("im_clients.daxiang.is_app_running", return_value=False)
+    def test_read_chat_returns_empty_when_not_running(self, _):
+        from im_clients.daxiang import DaxiangAdapter
+        adapter = DaxiangAdapter()
+        result = adapter.read_chat_messages()
+        self.assertEqual(result, [])
+
+    @patch("im_clients.daxiang.activate_app", return_value=True)
+    @patch("im_clients.daxiang.is_app_running", return_value=True)
+    @patch("im_clients.daxiang.get_ax_element")
+    @patch("im_clients.daxiang.bfs_find_msg_table", return_value=None)
+    def test_read_chat_returns_empty_when_no_table(self, table, ax_el, running, activate):
+        from im_clients.daxiang import DaxiangAdapter
+        adapter = DaxiangAdapter()
         result = adapter.read_chat_messages()
         self.assertEqual(result, [])
 
