@@ -39,8 +39,10 @@ from ai_reply import (
     AICommandNotFoundError,
     AICommandTimeoutError,
     AIEmptyResponseError,
+    AIReplyConfig,
     generate_reply,
 )
+from config import load_config, save_config
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -703,6 +705,7 @@ class WXSenderApp:
         self.mode_var = ctk.StringVar(value="phrases")
         self._ai_messages = []
         self._ai_generating = False
+        self._app_config = load_config()
         self.clients = discover_clients()
         self.current_client = choose_default_client(self.clients)
         self._client_label_to_id = {}
@@ -1013,6 +1016,26 @@ class WXSenderApp:
         )
         self.ai_regenerate_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
+        # ── 知识库状态行 ──
+        self.kb_row = ctk.CTkFrame(
+            self.ai_view, corner_radius=6, border_width=1,
+            fg_color="#fafafa", border_color="#e8e8e8",
+        )
+        self.kb_row.pack(fill="x", padx=12, pady=(0, 4))
+        self.kb_row.pack_propagate(False)
+        self.kb_row.configure(height=26)
+
+        self.kb_row_label = ctk.CTkLabel(
+            self.kb_row, text="📂 知识库未启用 — 点击设置",
+            text_color="#aaa", anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        self.kb_row_label.pack(side="left", padx=8)
+
+        self.kb_row.bind("<Button-1>", lambda e: self._show_ai_settings())
+        self.kb_row_label.bind("<Button-1>", lambda e: self._show_ai_settings())
+        self._update_kb_row()
+
         self.ai_status_label = ctk.CTkLabel(
             self.ai_view, text="选中当前接管对象聊天后，读取会话并生成回复。",
             text_color="#8c8c8c", anchor="w",
@@ -1069,6 +1092,21 @@ class WXSenderApp:
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=self._ai_send_reply,
         ).pack(fill="x", padx=12, pady=(0, 10))
+
+    def _update_kb_row(self):
+        """根据当前配置刷新知识库状态行外观。"""
+        cfg = self._app_config
+        if cfg.get("kb_enabled") and cfg.get("kb_vault_path"):
+            vault_name = os.path.basename(cfg["kb_vault_path"]) or cfg["kb_vault_path"]
+            self.kb_row.configure(fg_color="#f6ffed", border_color="#b7eb8f")
+            self.kb_row_label.configure(
+                text=f"📗 知识库已启用 · {vault_name}", text_color="#389e0d"
+            )
+        else:
+            self.kb_row.configure(fg_color="#fafafa", border_color="#e8e8e8")
+            self.kb_row_label.configure(
+                text="📂 知识库未启用 — 点击设置", text_color="#aaa"
+            )
 
     def _ai_set_status(self, text: str):
         self.ai_status_label.configure(text=text)
@@ -1142,9 +1180,14 @@ class WXSenderApp:
         self.ai_regenerate_btn.configure(state="disabled")
         self._ai_set_status("正在调用 AI 生成回复...")
 
+        ai_config = AIReplyConfig(
+            kb_enabled=self._app_config.get("kb_enabled", False),
+            kb_vault_path=self._app_config.get("kb_vault_path", ""),
+        )
+
         def generate_task():
             try:
-                reply = generate_reply(msgs)
+                reply = generate_reply(msgs, ai_config)
                 self.root.after(0, lambda: self._ai_generation_done(reply))
             except (
                 AICommandNotFoundError,
