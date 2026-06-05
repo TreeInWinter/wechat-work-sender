@@ -1,5 +1,6 @@
 # tests/test_wechat_ocr.py
 import unittest
+from unittest.mock import patch
 
 
 def _obs(text, x_center, y_top, width=0.3, height=0.03):
@@ -123,6 +124,58 @@ class ObsToDictTests(unittest.TestCase):
         self.assertAlmostEqual(result["y_top"], 0.65)           # 1 - (0.3 + 0.05)
         self.assertAlmostEqual(result["width"], 0.2)
         self.assertAlmostEqual(result["height"], 0.05)
+
+
+class CaptureAndOcrIntegrationTests(unittest.TestCase):
+    """验证 read_chat_messages 的整体流程（mock 截图和 OCR）。"""
+
+    @patch("im_clients.wechat_ocr._capture_chat_area", return_value=None)
+    def test_returns_empty_when_capture_fails(self, _capture):
+        from im_clients.wechat_ocr import read_chat_messages
+        result = read_chat_messages((0, 0, 800, 600))
+        self.assertEqual(result, [])
+
+    @patch("im_clients.wechat_ocr._capture_chat_area")
+    @patch("im_clients.wechat_ocr._run_vision_ocr")
+    @patch("im_clients.wechat_ocr._obs_to_dict")
+    def test_returns_parsed_messages_from_ocr(self, mock_to_dict, mock_ocr, mock_capture):
+        from unittest.mock import MagicMock
+        from im_clients.wechat_ocr import read_chat_messages
+
+        mock_capture.return_value = MagicMock()  # 假装截图成功
+
+        # mock OCR 返回 1 个 observation（MagicMock 的 topCandidates_ 是 truthy）
+        fake_obs = MagicMock()
+        mock_ocr.return_value = [fake_obs]
+
+        # mock _obs_to_dict 返回一个左侧消息
+        mock_to_dict.return_value = _obs("你好世界", 0.25, 0.1)
+
+        result = read_chat_messages((0, 0, 800, 600))
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["sender"], "对方")
+        self.assertEqual(result[0]["content"], "你好世界")
+
+    @patch("im_clients.wechat_ocr._capture_chat_area")
+    @patch("im_clients.wechat_ocr._run_vision_ocr")
+    @patch("im_clients.wechat_ocr._obs_to_dict")
+    def test_respects_max_messages_limit(self, mock_to_dict, mock_ocr, mock_capture):
+        from unittest.mock import MagicMock
+        from im_clients.wechat_ocr import read_chat_messages
+
+        mock_capture.return_value = MagicMock()
+
+        # 构造 5 条消息的 observations
+        fake_obs_list = [MagicMock() for _ in range(5)]
+        mock_ocr.return_value = fake_obs_list
+        mock_to_dict.side_effect = [
+            _obs(f"消息{i}", 0.25, i * 0.1) for i in range(5)
+        ]
+
+        result = read_chat_messages((0, 0, 800, 600), max_messages=3)
+
+        self.assertEqual(len(result), 3)  # 只返回最后 3 条
 
 
 if __name__ == "__main__":
