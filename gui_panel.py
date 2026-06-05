@@ -1124,6 +1124,7 @@ class WXSenderApp:
         win.lift()
         win.focus_force()
         win.grab_set()
+        win.attributes("-topmost", True)
 
         # ── Header ──
         header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
@@ -1171,10 +1172,12 @@ class WXSenderApp:
 
         def browse():
             from tkinter import filedialog
+            win.grab_release()
             chosen = filedialog.askdirectory(
                 title="选择 Obsidian Vault 文件夹",
                 parent=win,
             )
+            win.grab_set()
             if chosen:
                 path_var.set(chosen)
 
@@ -1197,7 +1200,11 @@ class WXSenderApp:
                 return
             self._app_config["kb_enabled"] = kb_var.get()
             self._app_config["kb_vault_path"] = path_var.get()
-            save_config(self._app_config)
+            try:
+                save_config(self._app_config)
+            except OSError as e:
+                self._show_warning(f"保存失败：{e}")
+                return
             self._app_config = load_config()
             self._update_kb_row()
             win.destroy()
