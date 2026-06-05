@@ -175,6 +175,23 @@ class BfsFindInputTests(unittest.TestCase):
 
         self.assertIsNone(result)
 
+    @patch("im_clients.ax_helpers.AXUIElementCopyAttributeValue")
+    def test_allow_with_value_accepts_placeholder_textarea(self, ax_mock):
+        """大象场景：输入框有占位符文本，allow_with_value=True 时应返回该元素。"""
+        root, ax_attr = self._make_ax_tree([
+            ("AXWindow", None),
+            ("AXGroup", None),
+            ("AXTextArea", "说点什么..."),  # 占位符，非空
+        ])
+        ax_mock.side_effect = ax_attr
+
+        from im_clients.ax_helpers import bfs_find_input
+        # 默认行为：跳过有值的 textarea
+        self.assertIsNone(bfs_find_input(root))
+        # allow_with_value=True：接受有占位符的 textarea
+        result = bfs_find_input(root, allow_with_value=True)
+        self.assertIsNotNone(result)
+
 
 class GetAxElementTests(unittest.TestCase):
     @patch("im_clients.ax_helpers.AXUIElementCreateApplication")

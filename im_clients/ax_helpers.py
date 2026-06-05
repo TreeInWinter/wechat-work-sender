@@ -78,12 +78,15 @@ def get_ax_element(app_name: str):
 # ── AX 树查找 ──────────────────────────────────────────────────
 
 
-def bfs_find_input(ax_root, max_depth: int = 10):
+def bfs_find_input(ax_root, max_depth: int = 10, allow_with_value: bool = False):
     """
-    BFS 找最浅的空 AXTextArea（聊天输入框）。
+    BFS 找最浅的 AXTextArea（聊天输入框）。
 
     BFS 优先命中最浅节点，避免先深入消息历史区找到只读的 AXTextArea。
     返回找到的 AX 元素，未找到返回 None。
+
+    allow_with_value: True 时也接受有值的 AXTextArea（如大象的占位符 "说点什么..."）。
+                      False（默认）时只接受 value=None 的空输入框（企业微信行为）。
     """
     queue = deque([(ax_root, 0)])
     while queue:
@@ -94,7 +97,7 @@ def bfs_find_input(ax_root, max_depth: int = 10):
             _, role = AXUIElementCopyAttributeValue(el, kAXRoleAttribute, None)
             if role == "AXTextArea":
                 _, val = AXUIElementCopyAttributeValue(el, kAXValueAttribute, None)
-                if not val:   # value=None 表示空可写输入框
+                if not val or allow_with_value:   # 空输入框，或允许占位符
                     return el
             _, children = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, None)
             if children:
@@ -105,9 +108,9 @@ def bfs_find_input(ax_root, max_depth: int = 10):
     return None
 
 
-def focus_input(ax_root, max_depth: int = 10) -> bool:
+def focus_input(ax_root, max_depth: int = 10, allow_with_value: bool = False) -> bool:
     """找到聊天输入框并聚焦，成功返回 True。"""
-    text_area = bfs_find_input(ax_root, max_depth)
+    text_area = bfs_find_input(ax_root, max_depth, allow_with_value=allow_with_value)
     if text_area is None:
         return False
     try:

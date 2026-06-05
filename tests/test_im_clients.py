@@ -64,16 +64,34 @@ class IMClientDiscoveryTests(unittest.TestCase):
 
 
 class IMClientAdapterTests(unittest.TestCase):
-    def test_unverified_adapter_blocks_send_daxiang_still_raises(self):
+    def test_daxiang_discovered_by_real_bundle_id(self):
+        """大象真实 bundle ID cn.neixin.pc 能被正确识别（真机探测 2026-06-05）。"""
         clients = discover_clients(
             [
-                ApplicationInfo(name="大象", bundle_id="com.sankuai.daxiang", running=True, pid=1234),
+                ApplicationInfo(name="大象", bundle_id="cn.neixin.pc", running=True, pid=797),
             ]
         )
         daxiang = next(client for client in clients if client.client_id == "daxiang")
+        self.assertTrue(daxiang.installed)
+        self.assertTrue(daxiang.running)
 
-        with self.assertRaises(UnsupportedClientAction):
-            daxiang.adapter.send_blocks([{"type": "text", "content": "hello"}])
+    @patch("im_clients.daxiang.activate_app", return_value=True)
+    @patch("im_clients.daxiang.is_app_running", return_value=True)
+    @patch("im_clients.daxiang.get_ax_element")
+    @patch("im_clients.daxiang.focus_input", return_value=True)
+    @patch("im_clients.daxiang.get_clipboard_text", return_value="")
+    @patch("im_clients.daxiang.paste_and_send")
+    @patch("im_clients.daxiang.set_clipboard_text")
+    def test_daxiang_focus_input_called_with_deep_max_depth(
+        self, set_clip, paste_mock, get_clip, focus_mock, ax_el, running, activate
+    ):
+        """大象输入框在 depth=24，focus_input 必须用 max_depth=26, allow_with_value=True。"""
+        from im_clients.daxiang import DaxiangAdapter
+        adapter = DaxiangAdapter()
+        adapter.send_blocks([{"type": "text", "content": "hello"}])
+        focus_mock.assert_called_once_with(
+            ax_el.return_value, max_depth=26, allow_with_value=True
+        )
 
     @patch("im_clients.wechat_work.sender")
     def test_enterprise_wechat_adapter_delegates_to_existing_sender(self, sender_mock):
@@ -212,22 +230,12 @@ class DaxiangAdapterSendTests(unittest.TestCase):
         with self.assertRaises(UnsupportedClientAction):
             adapter.send_blocks([{"type": "text", "content": "你好"}])
 
-    @patch("im_clients.daxiang.is_app_running", return_value=False)
-    def test_read_chat_returns_empty_when_not_running(self, _):
+    def test_read_chat_returns_empty(self):
+        """大象消息读取尚未实现（WebView 无 AXTable），始终返回 []。"""
         from im_clients.daxiang import DaxiangAdapter
         adapter = DaxiangAdapter()
-        result = adapter.read_chat_messages()
-        self.assertEqual(result, [])
-
-    @patch("im_clients.daxiang.activate_app", return_value=True)
-    @patch("im_clients.daxiang.is_app_running", return_value=True)
-    @patch("im_clients.daxiang.get_ax_element")
-    @patch("im_clients.daxiang.bfs_find_msg_table", return_value=None)
-    def test_read_chat_returns_empty_when_no_table(self, table, ax_el, running, activate):
-        from im_clients.daxiang import DaxiangAdapter
-        adapter = DaxiangAdapter()
-        result = adapter.read_chat_messages()
-        self.assertEqual(result, [])
+        self.assertEqual(adapter.read_chat_messages(), [])
+        self.assertEqual(adapter.read_chat_messages(max_messages=100), [])
 
 
 if __name__ == "__main__":
