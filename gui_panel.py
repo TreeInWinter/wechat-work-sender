@@ -715,6 +715,8 @@ class WXSenderApp:
         else:
             self.root.geometry("420x600")
         self._last_bounds = bounds
+        self._pending_bounds = None   # 候选坐标（需连续两次相同才生效，防瞬时抖动）
+        self._snap_threshold = 4      # 位置变化小于 4px 时不触发 geometry()
 
         self._build_ui()
         self._bind_shortcuts()
@@ -1262,13 +1264,42 @@ class WXSenderApp:
         return "break"
 
     def _poll_snap(self):
-        """每 100ms 直接在主线程读取窗口坐标（AX API 调用 <5ms，无需后台线程）"""
+        """
+        每 100ms 读取目标窗口坐标，稳定后贴靠。
+
+        两级防抖：
+        1. 阈值过滤：坐标变化 < _snap_threshold(4px) 时忽略（防 IME 弹框引起的 1-2px 抖动）
+        2. 稳定性确认：新坐标连续出现 2 次才调用 geometry()（防瞬时跳值）
+        """
         bounds = self._current_window_bounds()
-        if bounds and bounds != self._last_bounds:
+        if not bounds:
+            self._pending_bounds = None
+            self.root.after(100, self._poll_snap)
+            return
+
+        # 判断是否超过阈值
+        if self._last_bounds and not self._bounds_moved(bounds, self._last_bounds):
+            # 变化在阈值内，视为稳定，不更新
+            self._pending_bounds = None
+            self.root.after(100, self._poll_snap)
+            return
+
+        # 超过阈值：等待连续两次才生效（稳定性确认）
+        if bounds == self._pending_bounds:
+            # 第二次确认，真正更新
             self._last_bounds = bounds
+            self._pending_bounds = None
             wx, wy, ww, wh = bounds
             self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
+        else:
+            # 第一次出现，先记录为候选
+            self._pending_bounds = bounds
+
         self.root.after(100, self._poll_snap)
+
+    def _bounds_moved(self, new: tuple, old: tuple) -> bool:
+        """位置或尺寸变化是否超过阈值。"""
+        return any(abs(n - o) > self._snap_threshold for n, o in zip(new, old))
 
     def _check_status(self):
         """检查当前接管对象状态"""
