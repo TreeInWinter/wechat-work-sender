@@ -150,6 +150,8 @@ content = raw[:half] if half and raw[:half] == raw[half:] else raw
 
 AI 回复第一版使用 `mc --code -p --tools "" --no-session-persistence` 作为可配置命令入口。GUI 只展示候选回复并要求人工确认，不做自动发送。AI 调用封装在 `ai_reply.py`，便于未来替换为 Ollama、HTTP 接口或其他公司内部 CLI。
 
+消息格式（`_format_message`）：`发送者 [时间]: 内容`，其中 `发送者=我` 表示自己发的消息。提示词为通用 IM 助手（不写死"企业微信客服"），支持多 IM（大象/微信/企业微信）。
+
 ---
 
 ### 11. 微信（个人版）使用 Qt 渲染，AX 无法穿透，改用坐标点击
@@ -207,7 +209,7 @@ im_clients/
   ax_helpers.py     # 通用 AX 工具（参数化 app_name）
   wechat_work.py    # 企业微信 adapter（委托 sender.py，verified=True）
   wechat.py         # 微信个人版 adapter（Qt 渲染，坐标点击，verified=True）
-  daxiang.py        # 大象 adapter（发送 verified=True，读取 TODO）
+  daxiang.py        # 大象 adapter（发送 + 读取 verified=True）
 tools/
   explore_ax.py     # AX 树探测工具（探测新 IM app 时用）
 docs/
@@ -228,7 +230,7 @@ docs/
 | 分支 | 状态 | 说明 |
 |------|------|------|
 | `master` | 主干 | CustomTkinter UI + 图文混排基础 |
-| `feature/multi-im-adapters` | **活跃，待合并** | 微信 verified=True，大象 verified=True（发送），大象读取 TODO |
+| `feature/multi-im-adapters` | **活跃，待合并** | 微信/大象 发送+读取均 verified=True，OCR 读取微信消息实现中 |
 | `feature/rich-text` | 活跃 | 图文混排全功能（BlockEditor、send_blocks）|
 | `feature/macos-installer` | 未合并 | macOS .dmg 安装包 |
 | `feature/sync-minimize` | 未合并 | 同步最小化（已 revert，含文档）|
@@ -259,7 +261,7 @@ docs/
 
 11. **大象 bundle ID**：实际为 `cn.neixin.pc`（非 `com.sankuai.daxiang`）。输入框在 depth=23，有占位符文本，需 `allow_with_value=True`。`kAXWindowsAttribute` 在未激活时返回空，activate 后才有窗口。**AppleScript 进程名 `"大象"` 已真机验证可用**（发送 verified=True）。
 
-12. **大象消息读取 TODO**：大象无 AXTable，消息以 `AXStaticText` 散布 depth=22-25，与侧边栏联系人列表混合，无法简单用 `bfs_find_msg_table` 读取。需实现专门的解析器。
+12. **大象消息读取**：大象无 AXTable，消息在 AXStaticText depth=22（from window）。前 6 个节点是 UI 过滤器（未读/稍后/@我/单聊/群聊/图标），跳过。之后按序：时间戳 → 发送者名（2-4 汉字）→ 消息正文。depth=23 是侧边栏，不读取。已实现，真机验证通过。
 
 ---
 
