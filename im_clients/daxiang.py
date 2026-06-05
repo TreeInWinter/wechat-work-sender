@@ -39,7 +39,7 @@ class DaxiangAdapter(IMClientAdapter):
         can_window_bounds=True,
         can_send=True,
         can_read_chat=True,
-        verified=False,  # 真机发送测试通过后改为 True
+        verified=True,   # 真机验证：focus_input depth=26 + Cmd+V + AppleScript Enter 可靠
     )
 
     # AppleScript tell process 用的进程名（真机验证：大象）

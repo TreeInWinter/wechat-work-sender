@@ -172,7 +172,7 @@ def _click_input_area(self) -> bool:
 
 **进程名**：AppleScript `tell process "WeChat"`（不是 "微信"）
 
-**与大象的区别**：大象 AX 树结构待真机探测；若大象也用 Qt，同样改坐标点击。
+**与大象的区别**：大象使用 WebView 渲染（AXWebArea），AX 可穿透，输入框在 depth=23，走 BFS 路径（`allow_with_value=True`），无需坐标点击。
 
 ---
 
@@ -207,7 +207,7 @@ im_clients/
   ax_helpers.py     # 通用 AX 工具（参数化 app_name）
   wechat_work.py    # 企业微信 adapter（委托 sender.py，verified=True）
   wechat.py         # 微信个人版 adapter（Qt 渲染，坐标点击，verified=True）
-  daxiang.py        # 大象 adapter（发送已修复，verified=False，读取 TODO）
+  daxiang.py        # 大象 adapter（发送 verified=True，读取 TODO）
 tools/
   explore_ax.py     # AX 树探测工具（探测新 IM app 时用）
 docs/
@@ -228,7 +228,7 @@ docs/
 | 分支 | 状态 | 说明 |
 |------|------|------|
 | `master` | 主干 | CustomTkinter UI + 图文混排基础 |
-| `feature/multi-im-adapters` | **活跃，待合并** | 微信 verified，大象发送已修复（bundle ID + depth），大象读取 TODO |
+| `feature/multi-im-adapters` | **活跃，待合并** | 微信 verified=True，大象 verified=True（发送），大象读取 TODO |
 | `feature/rich-text` | 活跃 | 图文混排全功能（BlockEditor、send_blocks）|
 | `feature/macos-installer` | 未合并 | macOS .dmg 安装包 |
 | `feature/sync-minimize` | 未合并 | 同步最小化（已 revert，含文档）|
@@ -257,7 +257,7 @@ docs/
 
 10. **新增 IM adapter 流程**：先用 `tools/explore_ax.py <app名> 12` 探测 AX 树（需先激活 app，否则 kAXWindowsAttribute 返回 0）。若 AX 树能暴露 AXTextArea，走 BFS 路径；若树浅（≤10节点），改用坐标点击路径（参考 wechat.py）。
 
-11. **大象 bundle ID**：实际为 `cn.neixin.pc`（非 `com.sankuai.daxiang`）。输入框在 depth=23，有占位符文本，需 `allow_with_value=True`。`kAXWindowsAttribute` 在未激活时返回空，activate 后才有窗口。
+11. **大象 bundle ID**：实际为 `cn.neixin.pc`（非 `com.sankuai.daxiang`）。输入框在 depth=23，有占位符文本，需 `allow_with_value=True`。`kAXWindowsAttribute` 在未激活时返回空，activate 后才有窗口。**AppleScript 进程名 `"大象"` 已真机验证可用**（发送 verified=True）。
 
 12. **大象消息读取 TODO**：大象无 AXTable，消息以 `AXStaticText` 散布 depth=22-25，与侧边栏联系人列表混合，无法简单用 `bfs_find_msg_table` 读取。需实现专门的解析器。
 
