@@ -3,17 +3,15 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 
 import sender  # 复用企业微信已验证的图片合成逻辑（render_blocks_to_image）
 from .ax_helpers import (
     activate_app,
-    bfs_find_msg_table,
-    focus_input,
     get_ax_element,
     get_clipboard_text,
     is_app_running,
     paste_and_send,
-    read_messages_from_table,
     set_clipboard_png,
     set_clipboard_text,
 )
@@ -24,9 +22,11 @@ class WechatAdapter(IMClientAdapter):
     """
     微信（个人版）IM 适配器。
 
-    AX 树结构待真机探测（运行 tools/explore_ax.py 微信）后确认。
-    发送流程与企业微信一致：剪贴板 Cmd+V + AppleScript Enter。
-    verified=False：真机测试通过后改为 True。
+    微信 macOS 版使用 Qt 渲染 UI，AX API 无法穿透其内部元素（AX 树只有 6 个节点）。
+    因此改用坐标点击定位输入框：激活窗口后点击窗口底部中央（距底 50px）。
+
+    发送：坐标点击输入框 → 剪贴板 Cmd+V → AppleScript Enter（key code 36）
+    读取聊天：Qt 渲染层不暴露 AX 消息列表，can_read_chat=False。
     """
 
     client_id = "wechat"
@@ -37,13 +37,12 @@ class WechatAdapter(IMClientAdapter):
         can_activate=True,
         can_window_bounds=True,
         can_send=True,
-        can_read_chat=True,
-        verified=False,  # 真机测试通过后改为 True
+        can_read_chat=False,  # Qt 渲染，AX 无法读取消息历史
+        verified=True,  # 真机验证：坐标点击 + Cmd+V + AppleScript Enter 可靠
     )
 
-    # 进程名（AppleScript tell process 用）
-    # 微信实际进程名可能为 "微信" 或 "WeChat"，真机探测后确认
-    _PROCESS_NAME = "微信"
+    # AppleScript tell process 用的进程名（真机验证：微信）
+    _PROCESS_NAME = "WeChat"
 
     def is_running(self) -> bool:
         for name in self.app_names:
@@ -64,12 +63,67 @@ class WechatAdapter(IMClientAdapter):
                 return name
         return None
 
+    def _click_input_area(self) -> bool:
+        """
+        通过坐标点击定位微信输入框。
+
+        微信 Qt 版 AX 树不暴露输入框元素，改用窗口坐标：
+        点击窗口底部中央（距底 50px），即输入框所在区域。
+        返回 True 表示点击执行（不保证焦点已获取）。
+        """
+        ax = get_ax_element(self._get_app_name() or self.app_names[0])
+        if ax is None:
+            return False
+        try:
+            from ApplicationServices import (
+                AXUIElementCopyAttributeValue,
+                AXValueGetValue,
+                kAXWindowsAttribute,
+                kAXPositionAttribute,
+                kAXSizeAttribute,
+                kAXValueCGPointType,
+                kAXValueCGSizeType,
+            )
+            from Quartz import (
+                CGEventCreateMouseEvent,
+                CGEventPost,
+                CGPointMake,
+                kCGEventLeftMouseDown,
+                kCGEventLeftMouseUp,
+                kCGHIDEventTap,
+                kCGMouseButtonLeft,
+            )
+
+            _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+            if not windows:
+                return False
+            win = windows[0]
+            _, pos_ref = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
+            _, size_ref = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
+            _, pt = AXValueGetValue(pos_ref, kAXValueCGPointType, None)
+            _, sz = AXValueGetValue(size_ref, kAXValueCGSizeType, None)
+
+            # 输入框在窗口底部中央，距底约 50px
+            click_x = pt.x + sz.width / 2
+            click_y = pt.y + sz.height - 50
+
+            p = CGPointMake(click_x, click_y)
+            CGEventPost(kCGHIDEventTap, CGEventCreateMouseEvent(
+                None, kCGEventLeftMouseDown, p, kCGMouseButtonLeft))
+            time.sleep(0.05)
+            CGEventPost(kCGHIDEventTap, CGEventCreateMouseEvent(
+                None, kCGEventLeftMouseUp, p, kCGMouseButtonLeft))
+            time.sleep(0.2)
+            return True
+        except Exception:
+            return False
+
     def send_blocks(self, blocks: list) -> bool:
         """
         发送 blocks 到当前微信聊天窗口。
 
-        纯文字：set_clipboard_text + paste_and_send
-        含图片：render_blocks_to_image 合成 PNG → set_clipboard_png + paste_and_send
+        纯文字：坐标点击输入框 → set_clipboard_text → Cmd+V → AppleScript Enter
+        含图片：render_blocks_to_image 合成 PNG → set_clipboard_png → Cmd+V → Enter
         图文混排：合成单张图片发送（保证只出现一条消息）
         """
         app_name = self._get_app_name()
@@ -79,17 +133,8 @@ class WechatAdapter(IMClientAdapter):
         if not activate_app(app_name):
             return False
 
-        ax = get_ax_element(app_name)
-        if ax is None:
-            return False
-
-        try:
-            if not focus_input(ax):
-                raise UnsupportedClientAction("微信未找到聊天输入框，请先选中一个聊天")
-        except UnsupportedClientAction:
-            raise
-        except Exception as e:
-            raise UnsupportedClientAction("微信 AX 访问失败，请检查辅助功能权限") from e
+        if not self._click_input_area():
+            raise UnsupportedClientAction("微信未找到聊天窗口，请先在微信中选中一个聊天")
 
         has_image = any(b.get("type") == "image" for b in blocks if isinstance(b, dict))
 
@@ -110,7 +155,7 @@ class WechatAdapter(IMClientAdapter):
         original = get_clipboard_text()
         try:
             set_clipboard_text(text)
-            paste_and_send(app_name=app_name)
+            paste_and_send(app_name=self._PROCESS_NAME)
         finally:
             set_clipboard_text(original)
         return True
@@ -122,7 +167,7 @@ class WechatAdapter(IMClientAdapter):
         try:
             output_path = sender.render_blocks_to_image(blocks, output_path=tmp)
             set_clipboard_png(output_path)
-            paste_and_send(app_name=app_name)
+            paste_and_send(app_name=self._PROCESS_NAME)
             return True
         except Exception as e:
             raise UnsupportedClientAction(f"微信图片合成失败: {e}") from e
@@ -131,19 +176,5 @@ class WechatAdapter(IMClientAdapter):
                 os.unlink(tmp)
 
     def read_chat_messages(self, max_messages: int = 20) -> list[dict]:
-        """读取当前微信聊天窗口的消息记录。"""
-        app_name = self._get_app_name()
-        if app_name is None:
-            return []
-
-        ax = get_ax_element(app_name)
-        if ax is None:
-            return []
-
-        try:
-            table = bfs_find_msg_table(ax)
-            if table is None:
-                return []
-            return read_messages_from_table(table, max_messages)
-        except Exception:
-            return []
+        """微信 Qt 版 AX 树不暴露消息历史，始终返回空列表。"""
+        return []

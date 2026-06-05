@@ -22,6 +22,8 @@ class IMClientDiscoveryTests(unittest.TestCase):
         self.assertTrue(by_id["wechat_work"].capabilities.can_send)
         self.assertTrue(by_id["wechat"].capabilities.can_send)
         self.assertTrue(by_id["daxiang"].capabilities.can_send)
+        # 微信 Qt 版 AX 不暴露消息历史，can_read_chat=False
+        self.assertFalse(by_id["wechat"].capabilities.can_read_chat)
         self.assertTrue(by_id["daxiang"].capabilities.can_read_chat)
 
     def test_marks_running_state_independently_from_installed_state(self):
@@ -111,6 +113,14 @@ class IMClientAdapterTests(unittest.TestCase):
 
 
 class WechatAdapterSendTests(unittest.TestCase):
+    """
+    微信 adapter 测试。
+
+    微信 macOS 用 Qt 渲染，AX 树只有 6 个节点，无法用 AX API 找到输入框。
+    send_blocks 改用坐标点击（_click_input_area）定位输入框。
+    read_chat_messages 始终返回 []（Qt 渲染层不暴露消息历史）。
+    """
+
     @patch("im_clients.wechat.is_app_running", return_value=False)
     def test_send_blocks_returns_false_when_not_running(self, _):
         from im_clients.wechat import WechatAdapter
@@ -120,16 +130,16 @@ class WechatAdapterSendTests(unittest.TestCase):
 
     @patch("im_clients.wechat.activate_app", return_value=True)
     @patch("im_clients.wechat.is_app_running", return_value=True)
-    @patch("im_clients.wechat.get_ax_element")
-    @patch("im_clients.wechat.focus_input", return_value=True)
     @patch("im_clients.wechat.get_clipboard_text", return_value="")
     @patch("im_clients.wechat.paste_and_send")
     @patch("im_clients.wechat.set_clipboard_text")
     def test_send_text_calls_clipboard_and_paste(
-        self, set_clip, paste_mock, get_clip, focus, ax_el, running, activate
+        self, set_clip, paste_mock, get_clip, running, activate
     ):
         from im_clients.wechat import WechatAdapter
         adapter = WechatAdapter()
+        # mock _click_input_area 返回 True（绕过真实 AX/鼠标调用）
+        adapter._click_input_area = lambda: True
         result = adapter.send_blocks([{"type": "text", "content": "你好"}])
         self.assertTrue(result)
         set_clip.assert_any_call("你好")
@@ -137,31 +147,21 @@ class WechatAdapterSendTests(unittest.TestCase):
 
     @patch("im_clients.wechat.activate_app", return_value=True)
     @patch("im_clients.wechat.is_app_running", return_value=True)
-    @patch("im_clients.wechat.get_ax_element")
-    @patch("im_clients.wechat.focus_input", return_value=False)
-    def test_send_raises_when_no_chat_window(self, focus, ax_el, running, activate):
+    def test_send_raises_when_no_chat_window(self, running, activate):
         from im_clients.base import UnsupportedClientAction
         from im_clients.wechat import WechatAdapter
         adapter = WechatAdapter()
+        # _click_input_area 返回 False 模拟没有聊天窗口
+        adapter._click_input_area = lambda: False
         with self.assertRaises(UnsupportedClientAction):
             adapter.send_blocks([{"type": "text", "content": "你好"}])
 
-    @patch("im_clients.wechat.is_app_running", return_value=False)
-    def test_read_chat_returns_empty_when_not_running(self, _):
+    def test_read_chat_always_returns_empty(self):
+        """微信 Qt 版不支持读取聊天历史，无论是否运行都返回 []。"""
         from im_clients.wechat import WechatAdapter
         adapter = WechatAdapter()
-        result = adapter.read_chat_messages()
-        self.assertEqual(result, [])
-
-    @patch("im_clients.wechat.activate_app", return_value=True)
-    @patch("im_clients.wechat.is_app_running", return_value=True)
-    @patch("im_clients.wechat.get_ax_element")
-    @patch("im_clients.wechat.bfs_find_msg_table", return_value=None)
-    def test_read_chat_returns_empty_when_no_table(self, table, ax_el, running, activate):
-        from im_clients.wechat import WechatAdapter
-        adapter = WechatAdapter()
-        result = adapter.read_chat_messages()
-        self.assertEqual(result, [])
+        self.assertEqual(adapter.read_chat_messages(), [])
+        self.assertEqual(adapter.read_chat_messages(max_messages=100), [])
 
 
 class DaxiangAdapterSendTests(unittest.TestCase):
