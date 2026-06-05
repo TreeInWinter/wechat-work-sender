@@ -118,7 +118,7 @@ class WechatAdapterSendTests(unittest.TestCase):
 
     微信 macOS 用 Qt 渲染，AX 树只有 6 个节点，无法用 AX API 找到输入框。
     send_blocks 改用坐标点击（_click_input_area）定位输入框。
-    read_chat_messages 始终返回 []（Qt 渲染层不暴露消息历史）。
+    read_chat_messages 通过 Vision OCR 截图识别，委托 wechat_ocr.read_chat_messages()。
     """
 
     @patch("im_clients.wechat.is_app_running", return_value=False)
