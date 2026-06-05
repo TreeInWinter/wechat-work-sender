@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import time
 
 import sender  # 复用企业微信已验证的图片合成逻辑（render_blocks_to_image）
 from .ax_helpers import (
@@ -165,12 +166,22 @@ class DaxiangAdapter(IMClientAdapter):
         if app_name is None:
             return []
 
+        # kAXWindowsAttribute 在未激活时返回空，需要先激活再等 AX 树渲染
+        activate_app(app_name)
         ax = get_ax_element(app_name)
         if ax is None:
             return []
 
         try:
-            _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+            # 重试等待：AX 树在激活后需要 200-500ms 才完全展开
+            # 条件：窗口数 >= 2（main + chat panel）且有实质内容
+            windows = None
+            for _ in range(5):
+                _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+                if windows and len(windows) >= 2:
+                    break
+                time.sleep(0.15)
+
             if not windows:
                 return []
 
