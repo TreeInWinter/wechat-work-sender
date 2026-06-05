@@ -749,6 +749,12 @@ class WXSenderApp:
                        font=ctk.CTkFont(size=16),
                        command=self._refresh_targets_and_status).pack(side="right", padx=8)
 
+        ctk.CTkButton(status_frame, text="⚙", width=32, height=32,
+                       corner_radius=8, fg_color="transparent",
+                       hover_color=PRIMARY_H, text_color="white",
+                       font=ctk.CTkFont(size=15),
+                       command=self._show_ai_settings).pack(side="right", padx=(0, 2))
+
         ctk.CTkButton(status_frame, text="权限", width=48, height=30,
                        corner_radius=8, fg_color="transparent",
                        border_width=1, border_color="#4a9eff",
@@ -1109,8 +1115,114 @@ class WXSenderApp:
             )
 
     def _show_ai_settings(self):
-        """弹出 AI 知识库设置窗口。（Task 4 实现）"""
-        pass
+        """弹出 AI 知识库设置窗口。"""
+        self.root.attributes("-topmost", False)
+        win = ctk.CTkToplevel(self.root)
+        win.title("AI 知识库设置")
+        win.geometry("400x210")
+        win.resizable(False, False)
+        win.lift()
+        win.focus_force()
+        win.grab_set()
+
+        # ── Header ──
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        ctk.CTkLabel(
+            header, text="⚙  AI 知识库设置", text_color="white",
+            font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
+        ).pack(side="left", padx=14, pady=12)
+
+        # ── Body ──
+        body = ctk.CTkFrame(win, fg_color="white", corner_radius=0)
+        body.pack(fill="both", expand=True)
+
+        # 启用开关
+        row1 = ctk.CTkFrame(body, fg_color="transparent")
+        row1.pack(fill="x", padx=16, pady=(14, 6))
+        ctk.CTkLabel(
+            row1, text="启用知识库",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+        ).pack(side="left")
+        kb_var = ctk.BooleanVar(value=bool(self._app_config.get("kb_enabled")))
+        ctk.CTkSwitch(
+            row1, text="", variable=kb_var,
+            onvalue=True, offvalue=False, width=44,
+        ).pack(side="right")
+
+        # Vault 路径
+        row2 = ctk.CTkFrame(body, fg_color="transparent")
+        row2.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(
+            row2, text="Vault 路径",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            width=72, anchor="w",
+        ).pack(side="left")
+        path_var = ctk.StringVar(value=self._app_config.get("kb_vault_path", ""))
+        path_entry = ctk.CTkEntry(
+            row2, textvariable=path_var,
+            height=30, corner_radius=6, border_width=1,
+            border_color="#dce8ff",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            state="disabled",
+        )
+        path_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+
+        def browse():
+            from tkinter import filedialog
+            chosen = filedialog.askdirectory(
+                title="选择 Obsidian Vault 文件夹",
+                parent=win,
+            )
+            if chosen:
+                path_var.set(chosen)
+
+        ctk.CTkButton(
+            row2, text="浏览…", width=60, height=30, corner_radius=6,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=11),
+            command=browse,
+        ).pack(side="right")
+
+        # ── Footer ──
+        footer = ctk.CTkFrame(body, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(4, 14))
+        footer.grid_columnconfigure((0, 1), weight=1)
+
+        def on_save():
+            if kb_var.get() and not path_var.get():
+                self._show_warning("请先选择 Obsidian Vault 路径")
+                return
+            self._app_config["kb_enabled"] = kb_var.get()
+            self._app_config["kb_vault_path"] = path_var.get()
+            save_config(self._app_config)
+            self._app_config = load_config()
+            self._update_kb_row()
+            win.destroy()
+            self.root.attributes("-topmost", True)
+
+        def on_cancel():
+            win.destroy()
+            self.root.attributes("-topmost", True)
+
+        win.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        ctk.CTkButton(
+            footer, text="取消", height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            command=on_cancel,
+        ).grid(row=0, column=0, padx=(0, 5), sticky="ew")
+
+        ctk.CTkButton(
+            footer, text="保存", height=32, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=on_save,
+        ).grid(row=0, column=1, padx=(5, 0), sticky="ew")
 
     def _ai_set_status(self, text: str):
         self.ai_status_label.configure(text=text)
