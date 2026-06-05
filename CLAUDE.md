@@ -176,6 +176,23 @@ def _click_input_area(self) -> bool:
 
 ---
 
+### 12. 大象（`cn.neixin.pc`）WebView 渲染，输入框在 depth=23
+
+```python
+# 大象 AX 树探测结论（2026-06-05）：
+# - bundle ID: cn.neixin.pc（不是 com.sankuai.daxiang）
+# - AXWebArea 在 depth=5，聊天输入框 AXTextArea 在 depth=23（从 window 算）
+# - 输入框有占位符文本 '说点什么...'，需 allow_with_value=True
+# - 正确调用：
+focus_input(ax, max_depth=26, allow_with_value=True)
+```
+
+**与企业微信的区别**：企业微信输入框在 depth=6 且 value=None；大象在 depth=23 且有占位符。`bfs_find_input` 加了 `allow_with_value` 参数支持这两种情况。
+
+**消息读取**：大象消息历史没有 AXTable，是 `AXStaticText` 散布在 depth=22-25，与侧边栏联系人列表混合。`read_chat_messages()` 目前返回 `[]`，待后续单独实现解析器。
+
+---
+
 ## 项目文件结构
 
 ```
@@ -190,7 +207,7 @@ im_clients/
   ax_helpers.py     # 通用 AX 工具（参数化 app_name）
   wechat_work.py    # 企业微信 adapter（委托 sender.py，verified=True）
   wechat.py         # 微信个人版 adapter（Qt 渲染，坐标点击，verified=True）
-  daxiang.py        # 大象 adapter（待真机验证，verified=False）
+  daxiang.py        # 大象 adapter（发送已修复，verified=False，读取 TODO）
 tools/
   explore_ax.py     # AX 树探测工具（探测新 IM app 时用）
 docs/
@@ -211,7 +228,7 @@ docs/
 | 分支 | 状态 | 说明 |
 |------|------|------|
 | `master` | 主干 | CustomTkinter UI + 图文混排基础 |
-| `feature/multi-im-adapters` | **活跃，待合并** | 微信/大象 adapter（微信 verified，大象待真机测试）|
+| `feature/multi-im-adapters` | **活跃，待合并** | 微信 verified，大象发送已修复（bundle ID + depth），大象读取 TODO |
 | `feature/rich-text` | 活跃 | 图文混排全功能（BlockEditor、send_blocks）|
 | `feature/macos-installer` | 未合并 | macOS .dmg 安装包 |
 | `feature/sync-minimize` | 未合并 | 同步最小化（已 revert，含文档）|
@@ -238,7 +255,11 @@ docs/
 
 9. **微信 Qt 渲染 AX 不透过**：微信个人版 macOS 使用 Qt 渲染，AX 树只有 6 个节点，BFS 找不到输入框。改用坐标点击（窗口底部中央距底 50px）。`can_read_chat=False`（Qt 不暴露消息历史）。AppleScript 进程名为 `"WeChat"` 不是 `"微信"`。
 
-10. **新增 IM adapter 流程**：先用 `tools/explore_ax.py <app名> 12` 探测 AX 树。若 AX 树能暴露 AXTextArea，走 BFS 路径；若树浅（≤10节点），改用坐标点击路径（参考 wechat.py）。
+10. **新增 IM adapter 流程**：先用 `tools/explore_ax.py <app名> 12` 探测 AX 树（需先激活 app，否则 kAXWindowsAttribute 返回 0）。若 AX 树能暴露 AXTextArea，走 BFS 路径；若树浅（≤10节点），改用坐标点击路径（参考 wechat.py）。
+
+11. **大象 bundle ID**：实际为 `cn.neixin.pc`（非 `com.sankuai.daxiang`）。输入框在 depth=23，有占位符文本，需 `allow_with_value=True`。`kAXWindowsAttribute` 在未激活时返回空，activate 后才有窗口。
+
+12. **大象消息读取 TODO**：大象无 AXTable，消息以 `AXStaticText` 散布 depth=22-25，与侧边栏联系人列表混合，无法简单用 `bfs_find_msg_table` 读取。需实现专门的解析器。
 
 ---
 
