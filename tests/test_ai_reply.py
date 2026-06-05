@@ -88,5 +88,57 @@ class GenerateReplyTests(unittest.TestCase):
         self.assertIn("mc --code -p", str(ctx.exception))
 
 
+class BuildReplyPromptKBTests(unittest.TestCase):
+    def test_no_kb_preamble_when_disabled(self):
+        prompt = build_reply_prompt([{"content": "你好"}], kb_enabled=False)
+        self.assertNotIn("知识库", prompt)
+
+    def test_kb_preamble_present_when_enabled(self):
+        prompt = build_reply_prompt([{"content": "你好"}], kb_enabled=True)
+        self.assertIn("知识库", prompt)
+        self.assertIn("检索相关文档", prompt)
+
+
+class GenerateReplyKBTests(unittest.TestCase):
+    @patch("ai_reply.subprocess.run")
+    def test_kb_enabled_uses_add_dir_and_no_tools_flag(self, run_mock):
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="回复内容", stderr=""
+        )
+        config = AIReplyConfig(
+            command="mc", timeout=5,
+            kb_enabled=True, kb_vault_path="/tmp",
+        )
+        generate_reply([{"content": "问题"}], config)
+        cmd = run_mock.call_args.args[0]
+        self.assertIn("--add-dir", cmd)
+        self.assertIn("/tmp", cmd)
+        self.assertNotIn("--tools", cmd)
+
+    @patch("ai_reply.subprocess.run")
+    def test_kb_disabled_uses_tools_empty_arg(self, run_mock):
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="回复内容", stderr=""
+        )
+        config = AIReplyConfig(command="mc", timeout=5, kb_enabled=False)
+        generate_reply([{"content": "问题"}], config)
+        cmd = run_mock.call_args.args[0]
+        self.assertNotIn("--add-dir", cmd)
+        self.assertIn("--tools", cmd)
+
+    def test_kb_enabled_with_empty_path_raises(self):
+        config = AIReplyConfig(command="mc", timeout=5, kb_enabled=True, kb_vault_path="")
+        with self.assertRaises(AICommandFailedError):
+            generate_reply([{"content": "问题"}], config)
+
+    def test_kb_enabled_with_nonexistent_path_raises(self):
+        config = AIReplyConfig(
+            command="mc", timeout=5,
+            kb_enabled=True, kb_vault_path="/nonexistent/vault/xyz",
+        )
+        with self.assertRaises(AICommandFailedError):
+            generate_reply([{"content": "问题"}], config)
+
+
 if __name__ == "__main__":
     unittest.main()
