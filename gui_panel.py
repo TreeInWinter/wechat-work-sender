@@ -8,6 +8,7 @@
 """
 
 import json
+import math
 import os
 import subprocess
 import threading
@@ -703,6 +704,8 @@ class WXSenderApp:
         self.mode_var = ctk.StringVar(value="phrases")
         self._ai_messages = []
         self._ai_generating = False
+        self._ai_anim_running = False
+        self._ai_anim_tick = 0
         self.clients = discover_clients()
         self.current_client = choose_default_client(self.clients)
         self._client_label_to_id = {}
@@ -1086,6 +1089,67 @@ class WXSenderApp:
     def _ai_get_reply(self) -> str:
         return self.ai_reply_box.get("1.0", "end").strip()
 
+    # ── 生成中动效 ───────────────────────────────────────────
+
+    @staticmethod
+    def _lerp_color(c1: str, c2: str, t: float) -> str:
+        """在两个 #rrggbb 颜色间线性插值。"""
+        r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+        r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+        return "#{:02x}{:02x}{:02x}".format(
+            round(r1 + (r2 - r1) * t),
+            round(g1 + (g2 - g1) * t),
+            round(b1 + (b2 - b1) * t),
+        )
+
+    def _ai_start_loading_anim(self):
+        """启动候选回复文本框的 AI 生成动效（边框呼吸 + 框内光标闪烁）。"""
+        self._ai_anim_running = True
+        self._ai_anim_tick = 0
+        tb = self.ai_reply_box._textbox
+        tb.tag_configure("anim_dot",  foreground=PRIMARY)
+        tb.tag_configure("anim_msg",  foreground="#a8bedc")
+        tb.tag_configure("anim_cur",  foreground=PRIMARY)
+        self._ai_anim_step()
+
+    def _ai_stop_loading_anim(self):
+        """停止动效，恢复边框颜色，清空占位文字，恢复文本框可编辑。"""
+        self._ai_anim_running = False
+        self.ai_reply_box.configure(border_color="#dce8ff")
+        # 恢复底层 tk.Text 为可编辑（_ai_anim_step 最后一次 tick 可能将其设为 disabled）
+        self.ai_reply_box._textbox.configure(state="normal")
+        self.ai_reply_box.delete("1.0", "end")
+
+    def _ai_anim_step(self):
+        if not self._ai_anim_running:
+            return
+        n = self._ai_anim_tick
+
+        # 边框呼吸：正弦波，周期 28 tick = 1.4s（50ms/tick）
+        t_border = (math.sin(n * math.pi / 14) + 1) / 2
+        self.ai_reply_box.configure(
+            border_color=self._lerp_color("#dce8ff", "#1677ff", t_border)
+        )
+
+        # 框内占位文字：彩色点 + 提示文字 + 闪烁光标
+        t_dot = (math.sin(n * math.pi / 10) + 1) / 2
+        dot_color = self._lerp_color("#a0c4ff", "#1677ff", t_dot)
+        cursor_char = "▋" if (n // 9) % 2 == 0 else " "
+
+        tb = self.ai_reply_box._textbox
+        tb.configure(state="normal")
+        tb.delete("1.0", "end")
+        tb.tag_configure("anim_dot", foreground=dot_color)
+        tb.insert("end", "⬤ ", "anim_dot")
+        tb.insert("end", "AI 正在生成回复", "anim_msg")
+        tb.insert("end", cursor_char, "anim_cur")
+        tb.configure(state="disabled")
+
+        self._ai_anim_tick += 1
+        self.root.after(50, self._ai_anim_step)
+
+    # ─────────────────────────────────────────────────────────
+
     def _format_ai_messages(self, msgs: list) -> str:
         lines = []
         for msg in msgs:
@@ -1096,6 +1160,7 @@ class WXSenderApp:
     def _ai_read_and_generate(self):
         if self._ai_generating:
             return
+        self.ai_reply_box.delete("1.0", "end")
         self._ai_set_status("正在读取聊天内容...")
         self.ai_generate_btn.configure(state="disabled")
         client = self.current_client
@@ -1134,6 +1199,7 @@ class WXSenderApp:
         if not self._ai_messages:
             self._ai_read_and_generate()
             return
+        self.ai_reply_box.delete("1.0", "end")
         self._ai_generate_async(self._ai_messages)
 
     def _ai_generate_async(self, msgs: list):
@@ -1141,6 +1207,7 @@ class WXSenderApp:
         self.ai_generate_btn.configure(state="disabled")
         self.ai_regenerate_btn.configure(state="disabled")
         self._ai_set_status("正在调用 AI 生成回复...")
+        self._ai_start_loading_anim()
 
         def generate_task():
             try:
@@ -1162,6 +1229,7 @@ class WXSenderApp:
 
     def _ai_generation_done(self, reply: str):
         self._ai_generating = False
+        self._ai_stop_loading_anim()
         self.ai_generate_btn.configure(state="normal")
         self.ai_regenerate_btn.configure(state="normal")
         self._ai_set_reply(reply)
@@ -1169,6 +1237,7 @@ class WXSenderApp:
 
     def _ai_generation_failed(self, message: str):
         self._ai_generating = False
+        self._ai_stop_loading_anim()
         self.ai_generate_btn.configure(state="normal")
         self.ai_regenerate_btn.configure(state="normal")
         self._ai_set_status(message)
