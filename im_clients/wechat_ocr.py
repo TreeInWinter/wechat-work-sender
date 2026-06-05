@@ -164,6 +164,8 @@ def _parse_observations(obs_list: list[dict]) -> list[dict]:
         if _is_sender_name(obs, next_obs):
             sender = text
             i += 1  # 跳过昵称行，下一条是消息正文
+            if i >= len(sorted_obs):  # 昵称在末尾，无正文可读
+                break
             obs = sorted_obs[i]
             text = obs["text"].strip()
             x_center = obs["x_center"]
@@ -186,7 +188,7 @@ def _parse_observations(obs_list: list[dict]) -> list[dict]:
                 and not n_is_time
             ):
                 content_parts.append(n_text)
-                y_top = n["y_top"]
+                y_top = n["y_top"]  # 滑动窗口：比较相邻行间距，允许消息跨多行累积
                 i += 1
             else:
                 break
