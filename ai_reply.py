@@ -22,7 +22,7 @@ class AICommandTimeoutError(AIReplyError):
 
 
 class AICommandFailedError(AIReplyError):
-    """AI command exited with a non-zero status."""
+    """AI command exited with a non-zero status, or a pre-flight config check failed."""
 
 
 class AIEmptyResponseError(AIReplyError):
@@ -106,6 +106,8 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
         messages, max_messages=config.max_messages, kb_enabled=config.kb_enabled
     )
     if config.kb_enabled:
+        # KB mode: build command from scratch; config.args is intentionally bypassed
+        # because --tools "" would prevent file reading from the vault.
         cmd = [
             config.command, "--code", "-p",
             "--add-dir", config.kb_vault_path,
