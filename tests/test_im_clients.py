@@ -22,8 +22,8 @@ class IMClientDiscoveryTests(unittest.TestCase):
         self.assertTrue(by_id["wechat_work"].capabilities.can_send)
         self.assertTrue(by_id["wechat"].capabilities.can_send)
         self.assertTrue(by_id["daxiang"].capabilities.can_send)
-        # 微信 Qt 版 AX 不暴露消息历史，can_read_chat=False
-        self.assertFalse(by_id["wechat"].capabilities.can_read_chat)
+        # 微信 OCR 实现后 can_read_chat=True
+        self.assertTrue(by_id["wechat"].capabilities.can_read_chat)
         self.assertTrue(by_id["daxiang"].capabilities.can_read_chat)
 
     def test_marks_running_state_independently_from_installed_state(self):
@@ -156,12 +156,24 @@ class WechatAdapterSendTests(unittest.TestCase):
         with self.assertRaises(UnsupportedClientAction):
             adapter.send_blocks([{"type": "text", "content": "你好"}])
 
-    def test_read_chat_always_returns_empty(self):
-        """微信 Qt 版不支持读取聊天历史，无论是否运行都返回 []。"""
+    @patch("im_clients.wechat_ocr.read_chat_messages", return_value=[])
+    def test_read_chat_returns_empty_when_no_window(self, mock_ocr):
         from im_clients.wechat import WechatAdapter
         adapter = WechatAdapter()
-        self.assertEqual(adapter.read_chat_messages(), [])
-        self.assertEqual(adapter.read_chat_messages(max_messages=100), [])
+        adapter._get_window_bounds = lambda: None  # 无窗口
+        result = adapter.read_chat_messages()
+        self.assertEqual(result, [])
+
+    @patch("im_clients.wechat_ocr.read_chat_messages")
+    def test_read_chat_delegates_to_ocr_with_window_bounds(self, mock_ocr):
+        from im_clients.wechat import WechatAdapter
+        mock_ocr.return_value = [{"sender": "对方", "content": "你好", "time": None}]
+        adapter = WechatAdapter()
+        adapter._get_window_bounds = lambda: (100, 200, 800, 600)
+        result = adapter.read_chat_messages(max_messages=5)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["content"], "你好")
+        mock_ocr.assert_called_once_with((100, 200, 800, 600), max_messages=5)
 
 
 class DaxiangAdapterSendTests(unittest.TestCase):

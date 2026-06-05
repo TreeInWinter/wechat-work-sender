@@ -37,7 +37,7 @@ class WechatAdapter(IMClientAdapter):
         can_activate=True,
         can_window_bounds=True,
         can_send=True,
-        can_read_chat=False,  # Qt 渲染，AX 无法读取消息历史
+        can_read_chat=True,   # OCR 实现：截图 + Vision 识别
         verified=True,  # 真机验证：坐标点击 + Cmd+V + AppleScript Enter 可靠
     )
 
@@ -63,17 +63,15 @@ class WechatAdapter(IMClientAdapter):
                 return name
         return None
 
-    def _click_input_area(self) -> bool:
+    def _get_window_bounds(self) -> tuple | None:
         """
-        通过坐标点击定位微信输入框。
+        返回微信主窗口 (x, y, w, h)，未运行或无窗口返回 None。
 
-        微信 Qt 版 AX 树不暴露输入框元素，改用窗口坐标：
-        点击窗口底部中央（距底 50px），即输入框所在区域。
-        返回 True 表示点击执行（不保证焦点已获取）。
+        从 _click_input_area 中抽取，两个方法共用，避免重复 AX 调用。
         """
         ax = get_ax_element(self._get_app_name() or self.app_names[0])
         if ax is None:
-            return False
+            return None
         try:
             from ApplicationServices import (
                 AXUIElementCopyAttributeValue,
@@ -84,6 +82,30 @@ class WechatAdapter(IMClientAdapter):
                 kAXValueCGPointType,
                 kAXValueCGSizeType,
             )
+            _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+            if not windows:
+                return None
+            win = windows[0]
+            _, pos_ref = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
+            _, size_ref = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
+            _, pt = AXValueGetValue(pos_ref, kAXValueCGPointType, None)
+            _, sz = AXValueGetValue(size_ref, kAXValueCGSizeType, None)
+            return (pt.x, pt.y, sz.width, sz.height)
+        except Exception:
+            return None
+
+    def _click_input_area(self) -> bool:
+        """
+        通过坐标点击定位微信输入框。
+
+        微信 Qt 版 AX 树不暴露输入框元素，改用窗口坐标：
+        点击窗口底部中央（距底 50px），即输入框所在区域。
+        返回 True 表示点击执行（不保证焦点已获取）。
+        """
+        bounds = self._get_window_bounds()
+        if bounds is None:
+            return False
+        try:
             from Quartz import (
                 CGEventCreateMouseEvent,
                 CGEventPost,
@@ -93,20 +115,9 @@ class WechatAdapter(IMClientAdapter):
                 kCGHIDEventTap,
                 kCGMouseButtonLeft,
             )
-
-            _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
-            if not windows:
-                return False
-            win = windows[0]
-            _, pos_ref = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
-            _, size_ref = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
-            _, pt = AXValueGetValue(pos_ref, kAXValueCGPointType, None)
-            _, sz = AXValueGetValue(size_ref, kAXValueCGSizeType, None)
-
-            # 输入框在窗口底部中央，距底约 50px
-            click_x = pt.x + sz.width / 2
-            click_y = pt.y + sz.height - 50
-
+            x, y, w, h = bounds
+            click_x = x + w / 2
+            click_y = y + h - 50  # 输入框在窗口底部中央，距底约 50px
             p = CGPointMake(click_x, click_y)
             CGEventPost(kCGHIDEventTap, CGEventCreateMouseEvent(
                 None, kCGEventLeftMouseDown, p, kCGMouseButtonLeft))
@@ -176,5 +187,14 @@ class WechatAdapter(IMClientAdapter):
                 os.unlink(tmp)
 
     def read_chat_messages(self, max_messages: int = 20) -> list[dict]:
-        """微信 Qt 版 AX 树不暴露消息历史，始终返回空列表。"""
-        return []
+        """
+        截取微信聊天区域截图，通过 Vision OCR 识别消息内容。
+
+        返回格式: [{"sender": str, "content": str, "time": str | None}]
+        微信未运行或无窗口时返回 []。
+        """
+        from . import wechat_ocr
+        bounds = self._get_window_bounds()
+        if bounds is None:
+            return []
+        return wechat_ocr.read_chat_messages(bounds, max_messages=max_messages)
