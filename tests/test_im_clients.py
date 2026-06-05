@@ -230,12 +230,35 @@ class DaxiangAdapterSendTests(unittest.TestCase):
         with self.assertRaises(UnsupportedClientAction):
             adapter.send_blocks([{"type": "text", "content": "你好"}])
 
-    def test_read_chat_returns_empty(self):
-        """大象消息读取尚未实现（WebView 无 AXTable），始终返回 []。"""
+    @patch("im_clients.daxiang.is_app_running", return_value=False)
+    def test_read_chat_returns_empty_when_not_running(self, _):
         from im_clients.daxiang import DaxiangAdapter
         adapter = DaxiangAdapter()
         self.assertEqual(adapter.read_chat_messages(), [])
-        self.assertEqual(adapter.read_chat_messages(max_messages=100), [])
+
+    @patch("im_clients.daxiang.get_ax_element", return_value=None)
+    @patch("im_clients.daxiang.is_app_running", return_value=True)
+    def test_read_chat_returns_empty_when_no_ax(self, _running, _ax):
+        from im_clients.daxiang import DaxiangAdapter
+        adapter = DaxiangAdapter()
+        self.assertEqual(adapter.read_chat_messages(), [])
+
+    def test_parse_daxiang_messages_basic(self):
+        """验证 depth=22 序列解析：跳过 UI 过滤器，正确识别时间戳/发送者/消息。"""
+        from im_clients.daxiang import _parse_daxiang_messages
+        texts = [
+            "未读", "稍后", "@我", "单聊", "群聊", "",  # UI 过滤器
+            "10:30", "李朋(Jun Ze)", "明天几点开会？",         # 时间 → 发送者 → 消息
+            "10:45", "我下午两点有空",                         # 时间 → 消息（我发的）
+        ]
+        result = _parse_daxiang_messages(texts, max_messages=20)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["sender"], "李朋(Jun Ze)")
+        self.assertEqual(result[0]["content"], "明天几点开会？")
+        self.assertEqual(result[0]["time"], "10:30")
+        # 没有发送者名 → 默认"对方"（后续可改进为"我"的识别）
+        self.assertEqual(result[1]["content"], "我下午两点有空")
+        self.assertEqual(result[1]["time"], "10:45")
 
 
 if __name__ == "__main__":

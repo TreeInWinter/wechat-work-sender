@@ -50,11 +50,13 @@ class AIReplyConfig:
 
 
 def _format_message(message: dict) -> str:
+    """格式化单条消息，包含发送者，便于 AI 区分对话双方。"""
+    sender = str(message.get("sender", "")).strip() or "对方"
     content = str(message.get("content", "")).strip()
     time_str = message.get("time")
     if time_str:
-        return f"[{time_str}] {content}"
-    return content
+        return f"{sender} [{time_str}]: {content}"
+    return f"{sender}: {content}"
 
 
 def build_reply_prompt(messages: list[dict], max_messages: int = 20) -> str:
@@ -62,13 +64,13 @@ def build_reply_prompt(messages: list[dict], max_messages: int = 20) -> str:
     selected = useful[-max_messages:]
     transcript = "\n".join(_format_message(m) for m in selected)
     return (
-        "你是企业微信客服回复助手。请根据下面最近的聊天记录，生成一段可以直接发给客户的中文回复。\n\n"
+        "你是 IM 聊天回复助手。请根据下面最近的聊天记录，生成一段可以直接发送的中文回复。\n\n"
         "要求：\n"
         "1. 只输出最终回复正文，不要标题、解释、Markdown 或代码块。\n"
         "2. 语气礼貌、简洁、专业。\n"
         "3. 不要承诺无法从聊天记录确认的事实。\n"
         "4. 如果信息不足，先表达已收到，并说明需要进一步确认。\n\n"
-        "最近聊天记录：\n"
+        "最近聊天记录（格式：发送者 [时间]: 内容；发送者=我 表示你自己发的消息）：\n"
         f"{transcript}\n\n"
         "请输出回复："
     )

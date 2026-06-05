@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 
 import sender  # 复用企业微信已验证的图片合成逻辑（render_blocks_to_image）
@@ -136,12 +137,136 @@ class DaxiangAdapter(IMClientAdapter):
             if os.path.exists(tmp):
                 os.unlink(tmp)
 
+    # depth=22（from window）是当前聊天的消息区域
+    # depth=23 是侧边栏联系人列表，不包含在读取范围内
+    _MSG_DEPTH = 22
+
     def read_chat_messages(self, max_messages: int = 20) -> list[dict]:
         """
         读取当前大象聊天窗口的消息记录。
 
-        TODO: 大象使用 WebView 渲染，消息以 AXStaticText 散布在 depth=22-25，
-              无 AXTable 结构，需专门实现基于 AXStaticText 的解析器。
-              当前版本返回空列表，不影响发送功能。
+        大象 AX 树结构（真机探测 2026-06-05）：
+          - depth=22（from window）= 当前打开的聊天消息，顺序排列
+          - 前 6 个节点是 UI 过滤器（未读/稍后/@我/单聊/群聊/图标），跳过
+          - 然后按序：时间戳 → 发送者名 → 消息内容（可多行）→ 时间戳 → ...
+          - depth=23 是侧边栏联系人列表，排除在外
         """
-        return []
+        from collections import deque
+        from ApplicationServices import (
+            AXUIElementCopyAttributeValue,
+            AXUIElementCreateApplication,
+            kAXChildrenAttribute,
+            kAXRoleAttribute,
+            kAXValueAttribute,
+            kAXWindowsAttribute,
+        )
+
+        app_name = self._get_app_name()
+        if app_name is None:
+            return []
+
+        ax = get_ax_element(app_name)
+        if ax is None:
+            return []
+
+        try:
+            _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
+            if not windows:
+                return []
+
+            # BFS 收集 depth=22 的 AXStaticText，保留顺序
+            texts: list[str] = []
+            queue: deque = deque([(windows[0], 0)])
+            while queue:
+                el, d = queue.popleft()
+                if d > self._MSG_DEPTH:
+                    continue
+                _, role = AXUIElementCopyAttributeValue(el, kAXRoleAttribute, None)
+                _, val = AXUIElementCopyAttributeValue(el, kAXValueAttribute, None)
+                if role == "AXStaticText" and val and d == self._MSG_DEPTH:
+                    texts.append(str(val))
+                if d < self._MSG_DEPTH:
+                    _, ch = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, None)
+                    if ch:
+                        for c in ch:
+                            queue.append((c, d + 1))
+
+            return _parse_daxiang_messages(texts, max_messages)
+        except Exception:
+            return []
+
+
+# ── 大象消息解析 ────────────────────────────────────────────────────
+
+# depth=22 前 6 个固定 UI 过滤器
+_UI_TABS = {"未读", "稍后", "@我", "单聊", "群聊"}
+
+# 时间格式：10:30 / 09:59 / 06-04 17:53
+_TIME_RE = re.compile(r"^\d{1,2}:\d{2}$|^\d{2}-\d{2}\s+\d{1,2}:\d{2}$")
+
+# 图标字符（Unicode 私有区 -）
+_ICON_RE = re.compile(r"^[-]+$")
+
+# 发送者名称：2-4 个汉字，可选后跟 (Pinyin/英文昵称)
+_SENDER_RE = re.compile(r"^[一-鿿]{2,4}(\([A-Za-z\s.]+\))?$")
+
+
+def _is_junk(text: str) -> bool:
+    """过滤 UI 图标和空白。"""
+    t = text.strip()
+    return not t or bool(_ICON_RE.match(t))
+
+
+def _parse_daxiang_messages(texts: list[str], max_messages: int) -> list[dict]:
+    """
+    将 depth=22 的 AXStaticText 序列解析为结构化消息列表。
+
+    解析规则：
+      1. 跳过开头的 UI 过滤器（未读/稍后/…）和图标字符
+      2. 时间戳 → 更新 current_time，开始新消息组
+      3. 短且符合姓名格式（≤15 字符，无空格/标点）且当前消息内容为空 → 发送者名
+      4. 其余 → 消息正文（可多行追加到当前消息）
+      5. 遇到新时间戳或新发送者时 flush 上一条消息
+    """
+    # 跳过开头 UI 元素
+    start = 0
+    while start < len(texts) and (texts[start] in _UI_TABS or _is_junk(texts[start])):
+        start += 1
+
+    messages: list[dict] = []
+    current_time: str | None = None
+    current_sender: str | None = None
+    content_parts: list[str] = []
+
+    def flush() -> None:
+        body = "\n".join(p for p in content_parts if p.strip())
+        if body:
+            messages.append({
+                "sender": current_sender or "对方",
+                "content": body,
+                "time": current_time,
+            })
+
+    for raw in texts[start:]:
+        text = raw.strip()
+        if _is_junk(text):
+            continue
+
+        if _TIME_RE.match(text):
+            # 时间戳 → flush 上一条，开启新时间段
+            flush()
+            content_parts = []
+            current_time = text
+            current_sender = None
+        elif _SENDER_RE.match(text):
+            # 姓名模式（2-4 汉字，可选 Pinyin）→ flush 上条，开始新发送者
+            # 不限制 content_parts 是否为空：同一时间段内多条消息各有自己的发送者名
+            flush()
+            content_parts = []
+            current_sender = text
+        else:
+            # 消息正文（可多行）
+            content_parts.append(text)
+
+    flush()
+    return messages[-max_messages:]
