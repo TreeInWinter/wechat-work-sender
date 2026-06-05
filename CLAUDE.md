@@ -152,14 +152,47 @@ AI 回复第一版使用 `mc --code -p --tools "" --no-session-persistence` 作�
 
 ---
 
+### 11. 微信（个人版）使用 Qt 渲染，AX 无法穿透，改用坐标点击
+
+```python
+# 微信 macOS 版 AX 树只有 6 个顶层节点，无法用 BFS 找到输入框
+# 正确做法：激活窗口后，点击窗口底部中央（距底 50px）
+def _click_input_area(self) -> bool:
+    from Quartz import CGEventCreateMouseEvent, CGEventPost, kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGHIDEventTap, CGPointMake
+    bounds = self._get_window_bounds()  # (x, y, w, h)
+    click_x = bounds[0] + bounds[2] / 2
+    click_y = bounds[1] + bounds[3] - 50  # 距底 50px
+    # ... CGEventCreateMouseEvent + CGEventPost
+```
+
+**根本原因**：微信 macOS 版使用 **Qt 渲染 UI**（非 Electron/Chromium），Qt 渲染层不向 macOS AX API 暴露内部 UI 元素（AX 树仅 6 个节点）。因此：
+- BFS 找输入框 → **失败**（树太浅）
+- 消息历史 AXTable → **不存在**（`can_read_chat=False`）
+- 坐标点击输入框区域 → **可靠**（真机验证通过）
+
+**进程名**：AppleScript `tell process "WeChat"`（不是 "微信"）
+
+**与大象的区别**：大象 AX 树结构待真机探测；若大象也用 Qt，同样改坐标点击。
+
+---
+
 ## 项目文件结构
 
 ```
 gui_panel.py      # CustomTkinter GUI（BlockEditor、PhraseCard、发送逻辑）
-sender.py         # 核心：send_message/send_image/send_blocks/AX API/read_chat
+sender.py         # 核心：send_message/send_image/send_blocks/AX API/read_chat（企业微信）
 phrases.json      # 话术数据（用户数据）
 build.spec        # PyInstaller 打包配置（arm64）
 build.sh          # 一键打包脚本（输出 dist/wechat-sender.dmg ~31MB）
+im_clients/
+  base.py           # IMClientAdapter 基类、TakeoverCapabilities、UnsupportedClientAction
+  registry.py       # discover_clients()、choose_default_client()
+  ax_helpers.py     # 通用 AX 工具（参数化 app_name）
+  wechat_work.py    # 企业微信 adapter（委托 sender.py，verified=True）
+  wechat.py         # 微信个人版 adapter（Qt 渲染，坐标点击，verified=True）
+  daxiang.py        # 大象 adapter（待真机验证，verified=False）
+tools/
+  explore_ax.py     # AX 树探测工具（探测新 IM app 时用）
 docs/
   design.md           # 技术设计文档
   product.md          # 产品文档
@@ -178,6 +211,7 @@ docs/
 | 分支 | 状态 | 说明 |
 |------|------|------|
 | `master` | 主干 | CustomTkinter UI + 图文混排基础 |
+| `feature/multi-im-adapters` | **活跃，待合并** | 微信/大象 adapter（微信 verified，大象待真机测试）|
 | `feature/rich-text` | 活跃 | 图文混排全功能（BlockEditor、send_blocks）|
 | `feature/macos-installer` | 未合并 | macOS .dmg 安装包 |
 | `feature/sync-minimize` | 未合并 | 同步最小化（已 revert，含文档）|
@@ -201,6 +235,10 @@ docs/
 7. **resizable(False, False)**：主窗口禁止手动拖拽，`geometry()` 程序化调用不受影响。
 
 8. **macOS 安装包**：`build.spec` 必须 `collect_all('customtkinter')` + `collect_all('tkinter')`，否则启动崩溃。`DATA_FILE` 必须在 `~/Library/Application Support/`，bundle 内只读。
+
+9. **微信 Qt 渲染 AX 不透过**：微信个人版 macOS 使用 Qt 渲染，AX 树只有 6 个节点，BFS 找不到输入框。改用坐标点击（窗口底部中央距底 50px）。`can_read_chat=False`（Qt 不暴露消息历史）。AppleScript 进程名为 `"WeChat"` 不是 `"微信"`。
+
+10. **新增 IM adapter 流程**：先用 `tools/explore_ax.py <app名> 12` 探测 AX 树。若 AX 树能暴露 AXTextArea，走 BFS 路径；若树浅（≤10节点），改用坐标点击路径（参考 wechat.py）。
 
 ---
 
@@ -232,6 +270,11 @@ while queue:
     if ch:
         for c in ch: queue.append((c, d+1))
 "
+
+# 探测任意 IM app 的 AX 树（新增 adapter 时用）
+.venv/bin/python tools/explore_ax.py 微信 12
+.venv/bin/python tools/explore_ax.py 大象 12
+.venv/bin/python tools/explore_ax.py 企业微信 10
 
 # 打包（Apple Silicon .dmg）
 ./build.sh   # 输出 dist/wechat-sender.dmg
