@@ -55,7 +55,7 @@ def _capture_chat_area(window_bounds: tuple):
         CGRectMake,
         kCGWindowListOptionAll,
         kCGNullWindowID,
-        kCGWindowImageDefault,
+        kCGWindowImageBestResolution,  # 强制 Retina 全分辨率截图（比 Default 清晰）
     )
     x, y, w, h = window_bounds
     crop_y = y + _TOP_SKIP
@@ -64,7 +64,7 @@ def _capture_chat_area(window_bounds: tuple):
         return None
     rect = CGRectMake(x, crop_y, w, crop_h)
     cg_image = CGWindowListCreateImage(
-        rect, kCGWindowListOptionAll, kCGNullWindowID, kCGWindowImageDefault
+        rect, kCGWindowListOptionAll, kCGNullWindowID, kCGWindowImageBestResolution
     )
     if cg_image is None:
         return None
@@ -88,10 +88,14 @@ def _run_vision_ocr(ns_image) -> list:
         return []
     handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(png_data, None)
     request = Vision.VNRecognizeTextRequest.alloc().init()
-    request.setRecognitionLevel_(1)  # VNRequestTextRecognitionLevelAccurate
+    request.setRecognitionLevel_(1)        # VNRequestTextRecognitionLevelAccurate
     request.setRecognitionLanguages_(["zh-Hans", "zh-Hant", "en"])
     request.setUsesLanguageCorrection_(True)
-    handler.performRequests_error_([request], None)
+    request.setMinimumTextHeight_(0.01)    # 识别更小字号（默认值太高会漏掉短消息）
+    _, err = handler.performRequests_error_([request], None)
+    if err:
+        import logging
+        logging.warning("Vision OCR error: %s", err)
     return list(request.results() or [])
 
 
