@@ -148,49 +148,50 @@ class IMClientAdapter:
         return None
 
     def _get_ax_window_bounds(self) -> tuple[int, int, int, int] | None:
+        """
+        使用 CGWindowListCopyWindowInfo 获取应用主窗口屏幕坐标。
+
+        比 AX kAXWindowsAttribute 更可靠：
+        - kCGWindowLayer=0 过滤输入法弹框（layer≥100）和浮动面板（layer=3）
+        - kCGWindowOwnerPID 限定进程
+        - 优先选 app_names 中有名字的窗口（通常是主窗口）；否则取面积最大的
+        """
         app = self._get_runtime_app()
         if app is None:
             return None
+        pid = app.processIdentifier()
         try:
-            from ApplicationServices import (
-                AXUIElementCopyAttributeValue,
-                AXUIElementCreateApplication,
-                AXValueGetValue,
-                kAXPositionAttribute,
-                kAXSizeAttribute,
-                kAXValueCGPointType,
-                kAXValueCGSizeType,
-                kAXWindowsAttribute,
+            from Quartz import (
+                CGWindowListCopyWindowInfo,
+                kCGWindowListOptionOnScreenOnly,
+                kCGNullWindowID,
             )
-
-            ax = AXUIElementCreateApplication(app.processIdentifier())
-            _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
-            if not windows:
-                return None
-
-            # 取面积最大的窗口（主窗口）
-            # 不用 windows[0]：输入法弹框/对话框出现时窗口顺序可能变化，
-            # 导致面板跟随 IME 小窗而不是主窗口。
-            best_win = None
-            best_area = 0
-            for w in windows:
-                try:
-                    _, sz_ref = AXUIElementCopyAttributeValue(w, kAXSizeAttribute, None)
-                    _, sz = AXValueGetValue(sz_ref, kAXValueCGSizeType, None)
-                    area = sz.width * sz.height
-                    if area > best_area:
-                        best_area = area
-                        best_win = w
-                except Exception:
+            cg_windows = CGWindowListCopyWindowInfo(
+                kCGWindowListOptionOnScreenOnly,
+                kCGNullWindowID,
+            )
+            named_best: dict | None = None
+            area_best: dict | None = None
+            area_best_val = 0
+            for w in cg_windows:
+                if w.get("kCGWindowOwnerPID") != pid:
                     continue
-            if best_win is None:
+                if w.get("kCGWindowLayer", -1) != 0:
+                    continue  # 只要 layer=0，过滤 IME（layer≥100）和浮动窗口（layer=3+）
+                b = w.get("kCGWindowBounds", {})
+                area = b.get("Width", 0) * b.get("Height", 0)
+                if area <= 0:
+                    continue
+                name = w.get("kCGWindowName") or ""
+                if name in self.app_names and named_best is None:
+                    named_best = b   # 找到有名字的主窗口，记录并继续（可能有多个）
+                if area > area_best_val:
+                    area_best_val = area
+                    area_best = b
+            best = named_best if named_best is not None else area_best
+            if best is None:
                 return None
-
-            _, pos_ref = AXUIElementCopyAttributeValue(best_win, kAXPositionAttribute, None)
-            _, size_ref = AXUIElementCopyAttributeValue(best_win, kAXSizeAttribute, None)
-            _, pt = AXValueGetValue(pos_ref, kAXValueCGPointType, None)
-            _, sz = AXValueGetValue(size_ref, kAXValueCGSizeType, None)
-            return (int(pt.x), int(pt.y), int(sz.width), int(sz.height))
+            return (int(best["X"]), int(best["Y"]), int(best["Width"]), int(best["Height"]))
         except Exception:
             return None
 
