@@ -1108,6 +1108,10 @@ class WXSenderApp:
                 text="📂 知识库未启用 — 点击设置", text_color="#aaa"
             )
 
+    def _show_ai_settings(self):
+        """弹出 AI 知识库设置窗口。（Task 4 实现）"""
+        pass
+
     def _ai_set_status(self, text: str):
         self.ai_status_label.configure(text=text)
 
