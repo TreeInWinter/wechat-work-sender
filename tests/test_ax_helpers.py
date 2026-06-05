@@ -193,6 +193,25 @@ class BfsFindInputTests(unittest.TestCase):
         self.assertIsNotNone(result)
 
 
+class GetLargestWindowTests(unittest.TestCase):
+    """验证 get_largest_window 选取面积最大的窗口（主窗口），而非 windows[0]。"""
+
+    def test_returns_none_for_empty_list(self):
+        from im_clients.ax_helpers import get_largest_window
+        self.assertIsNone(get_largest_window([]))
+
+    @patch("im_clients.ax_helpers.AXUIElementCopyAttributeValue")
+    def test_returns_none_when_all_windows_fail(self, ax_mock):
+        """所有窗口 AX 调用失败时返回 None（不崩溃）。"""
+        from unittest.mock import MagicMock
+        from im_clients.ax_helpers import get_largest_window
+
+        ax_mock.side_effect = Exception("AX error")
+        win1, win2 = MagicMock(), MagicMock()
+        result = get_largest_window([win1, win2])
+        self.assertIsNone(result)
+
+
 class GetAxElementTests(unittest.TestCase):
     @patch("im_clients.ax_helpers.AXUIElementCreateApplication")
     @patch("im_clients.ax_helpers.get_running_app")

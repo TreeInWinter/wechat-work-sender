@@ -167,9 +167,27 @@ class IMClientAdapter:
             _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
             if not windows:
                 return None
-            win = windows[0]
-            _, pos_ref = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
-            _, size_ref = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
+
+            # 取面积最大的窗口（主窗口）
+            # 不用 windows[0]：输入法弹框/对话框出现时窗口顺序可能变化，
+            # 导致面板跟随 IME 小窗而不是主窗口。
+            best_win = None
+            best_area = 0
+            for w in windows:
+                try:
+                    _, sz_ref = AXUIElementCopyAttributeValue(w, kAXSizeAttribute, None)
+                    _, sz = AXValueGetValue(sz_ref, kAXValueCGSizeType, None)
+                    area = sz.width * sz.height
+                    if area > best_area:
+                        best_area = area
+                        best_win = w
+                except Exception:
+                    continue
+            if best_win is None:
+                return None
+
+            _, pos_ref = AXUIElementCopyAttributeValue(best_win, kAXPositionAttribute, None)
+            _, size_ref = AXUIElementCopyAttributeValue(best_win, kAXSizeAttribute, None)
             _, pt = AXValueGetValue(pos_ref, kAXValueCGPointType, None)
             _, sz = AXValueGetValue(size_ref, kAXValueCGSizeType, None)
             return (int(pt.x), int(pt.y), int(sz.width), int(sz.height))

@@ -10,6 +10,7 @@ from .ax_helpers import (
     activate_app,
     get_ax_element,
     get_clipboard_text,
+    get_largest_window,
     is_app_running,
     paste_and_send,
     set_clipboard_png,
@@ -85,7 +86,9 @@ class WechatAdapter(IMClientAdapter):
             _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
             if not windows:
                 return None
-            win = windows[0]
+            win = get_largest_window(windows)  # 取主窗口，避免输入法弹框干扰
+            if win is None:
+                return None
             _, pos_ref = AXUIElementCopyAttributeValue(win, kAXPositionAttribute, None)
             _, size_ref = AXUIElementCopyAttributeValue(win, kAXSizeAttribute, None)
             _, pt = AXValueGetValue(pos_ref, kAXValueCGPointType, None)

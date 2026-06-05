@@ -78,6 +78,30 @@ def get_ax_element(app_name: str):
 # ── AX 树查找 ──────────────────────────────────────────────────
 
 
+def get_largest_window(windows):
+    """
+    从 kAXWindowsAttribute 返回的列表中选取面积最大的窗口（主窗口）。
+
+    不用 windows[0]：输入法弹框或小对话框出现时 macOS 会改变窗口顺序，
+    导致面板坐标跟随 IME 小窗跳动。主窗口始终是面积最大的。
+    """
+    from ApplicationServices import AXValueGetValue, kAXSizeAttribute, kAXValueCGSizeType
+
+    best = None
+    best_area = 0.0
+    for w in windows:
+        try:
+            _, sz_ref = AXUIElementCopyAttributeValue(w, kAXSizeAttribute, None)
+            _, sz = AXValueGetValue(sz_ref, kAXValueCGSizeType, None)
+            area = sz.width * sz.height
+            if area > best_area:
+                best_area = area
+                best = w
+        except Exception:
+            continue
+    return best
+
+
 def bfs_find_input(ax_root, max_depth: int = 10, allow_with_value: bool = False):
     """
     BFS 找最浅的 AXTextArea（聊天输入框）。

@@ -11,6 +11,7 @@ from .ax_helpers import (
     focus_input,
     get_ax_element,
     get_clipboard_text,
+    get_largest_window,
     is_app_running,
     paste_and_send,
     set_clipboard_png,
@@ -154,7 +155,6 @@ class DaxiangAdapter(IMClientAdapter):
         from collections import deque
         from ApplicationServices import (
             AXUIElementCopyAttributeValue,
-            AXUIElementCreateApplication,
             kAXChildrenAttribute,
             kAXRoleAttribute,
             kAXValueAttribute,
@@ -174,9 +174,14 @@ class DaxiangAdapter(IMClientAdapter):
             if not windows:
                 return []
 
+            # 取面积最大的窗口（主窗口），避免输入法弹框干扰
+            main_win = get_largest_window(windows)
+            if main_win is None:
+                return []
+
             # BFS 收集 depth=22 的 AXStaticText，保留顺序
             texts: list[str] = []
-            queue: deque = deque([(windows[0], 0)])
+            queue: deque = deque([(main_win, 0)])
             while queue:
                 el, d = queue.popleft()
                 if d > self._MSG_DEPTH:
