@@ -708,6 +708,7 @@ class WXSenderApp:
         self.mode_var = ctk.StringVar(value="phrases")
         self._ai_messages = []
         self._ai_generating = False
+        self._ai_kb_capturing = False
         self._ai_anim_running = False
         self._ai_anim_tick = 0
         self._app_config = load_config()
@@ -1325,8 +1326,9 @@ class WXSenderApp:
         self.ai_reply_box.delete("1.0", "end")
         self.ai_reply_box.insert("end", text)
         if hasattr(self, "ai_save_btn"):
+            capturing = getattr(self, "_ai_kb_capturing", False)
             self.ai_save_btn.configure(
-                state="normal" if text.strip() else "disabled"
+                state="normal" if (text.strip() and not capturing) else "disabled"
             )
 
     def _ai_get_reply(self) -> str:
@@ -1523,6 +1525,9 @@ class WXSenderApp:
         if not reply:
             return  # 按钮本应 disabled，防御性检查
 
+        if self._ai_kb_capturing:
+            return  # 防止重入
+        self._ai_kb_capturing = True
         self.ai_save_btn.configure(state="disabled", text="提炼中…")
         msgs = list(self._ai_messages)  # 快照，防止线程读写竞争
 
@@ -1539,6 +1544,7 @@ class WXSenderApp:
 
     def _ai_kb_capture_done(self, entry_dict: dict | None, reply: str):
         """提炼完成（或失败）后恢复按钮并弹出编辑弹窗。"""
+        self._ai_kb_capturing = False
         self.ai_save_btn.configure(state="normal", text="💾 存入知识库")
         source_name = (
             self.current_client.display_name if self.current_client else "未知来源"
