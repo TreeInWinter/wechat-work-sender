@@ -140,5 +140,78 @@ class GenerateReplyKBTests(unittest.TestCase):
             generate_reply([{"content": "问题"}], config)
 
 
+# ── extract_kb_entry ─────────────────────────────────────────────────────────
+
+from ai_reply import extract_kb_entry
+
+
+class ExtractKBEntryTests(unittest.TestCase):
+    @patch("ai_reply.subprocess.run")
+    def test_returns_parsed_dict_on_success(self, run_mock):
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"title": "订单查询", "scenario": "用户询问进度", "tags": ["订单", "客服"]}',
+            stderr="",
+        )
+        config = AIReplyConfig(command="mc", timeout=5)
+        result = extract_kb_entry([{"content": "询问进度"}], "您好", config)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["title"], "订单查询")
+        self.assertEqual(result["tags"], ["订单", "客服"])
+
+    @patch("ai_reply.subprocess.run")
+    def test_returns_none_on_invalid_json(self, run_mock):
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="不是 JSON 内容", stderr=""
+        )
+        config = AIReplyConfig(command="mc", timeout=5)
+        result = extract_kb_entry([{"content": "询问进度"}], "您好", config)
+        self.assertIsNone(result)
+
+    @patch("ai_reply.subprocess.run", side_effect=subprocess.TimeoutExpired(["mc"], timeout=10))
+    def test_returns_none_on_timeout(self, _run_mock):
+        config = AIReplyConfig(command="mc", timeout=10)
+        result = extract_kb_entry([{"content": "询问进度"}], "您好", config)
+        self.assertIsNone(result)
+
+    @patch("ai_reply.subprocess.run")
+    def test_returns_none_on_nonzero_exit(self, run_mock):
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="error"
+        )
+        config = AIReplyConfig(command="mc", timeout=5)
+        result = extract_kb_entry([{"content": "询问进度"}], "您好", config)
+        self.assertIsNone(result)
+
+    @patch("ai_reply.subprocess.run")
+    def test_command_never_uses_add_dir(self, run_mock):
+        """提炼任务不需要访问 vault，确保命令中没有 --add-dir。"""
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"title": "t", "scenario": "s", "tags": []}',
+            stderr="",
+        )
+        config = AIReplyConfig(
+            command="mc", timeout=5, kb_enabled=True, kb_vault_path="/tmp"
+        )
+        extract_kb_entry([{"content": "test"}], "reply", config)
+        cmd = run_mock.call_args.args[0]
+        self.assertNotIn("--add-dir", cmd)
+        self.assertIn("--tools", cmd)
+
+    @patch("ai_reply.subprocess.run")
+    def test_strips_markdown_code_fence(self, run_mock):
+        """mc 有时会把 JSON 包在 ```json ... ``` 里，应能正常解析。"""
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='```json\n{"title": "t", "scenario": "s", "tags": []}\n```',
+            stderr="",
+        )
+        config = AIReplyConfig(command="mc", timeout=5)
+        result = extract_kb_entry([{"content": "test"}], "reply", config)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["title"], "t")
+
+
 if __name__ == "__main__":
     unittest.main()
