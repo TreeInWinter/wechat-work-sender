@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -16,6 +16,11 @@ class KBEntry:
     reply: str
     source: str
     date: str  # YYYY-MM-DD
+
+
+def _yaml_str(value: str) -> str:
+    """Quote a string value for safe embedding in YAML frontmatter."""
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
 def _sanitize_filename(name: str) -> str:
@@ -37,17 +42,17 @@ def save_to_vault(entry: KBEntry, vault_path: str) -> str:
     base = f"{entry.date}-{safe_title}"
     dest = os.path.join(folder, f"{base}.md")
 
-    if os.path.exists(dest):
-        suffix = datetime.now().strftime("%H%M%S")
+    while os.path.exists(dest):
+        suffix = datetime.now().strftime("%H%M%S%f")[:9]  # add microseconds for uniqueness
         dest = os.path.join(folder, f"{base}-{suffix}.md")
 
-    tags_str = "[" + ", ".join(entry.tags) + "]"
+    tags_str = "[" + ", ".join(f'"{t}"' for t in entry.tags) + "]"
     content = (
         f"---\n"
-        f"title: {entry.title}\n"
+        f"title: {_yaml_str(entry.title)}\n"
         f"date: {entry.date}\n"
         f"tags: {tags_str}\n"
-        f"source: {entry.source}\n"
+        f"source: {_yaml_str(entry.source)}\n"
         f"---\n\n"
         f"## 适用场景\n"
         f"{entry.scenario}\n\n"

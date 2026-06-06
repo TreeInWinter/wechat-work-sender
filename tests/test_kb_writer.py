@@ -31,10 +31,10 @@ class SaveToVaultTests(unittest.TestCase):
     def test_file_contains_yaml_frontmatter(self):
         path = save_to_vault(self.entry, self.vault)
         content = open(path, encoding="utf-8").read()
-        self.assertIn("title: 订单查询", content)
+        self.assertIn('title: "订单查询"', content)
         self.assertIn("date: 2026-06-06", content)
-        self.assertIn("tags: [订单, 客服, SOP]", content)
-        self.assertIn("source: 企业微信", content)
+        self.assertIn('tags: ["订单", "客服", "SOP"]', content)
+        self.assertIn('source: "企业微信"', content)
 
     def test_file_contains_body_sections(self):
         path = save_to_vault(self.entry, self.vault)
