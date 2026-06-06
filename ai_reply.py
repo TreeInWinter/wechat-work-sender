@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import os
 import shutil
 import subprocess
@@ -85,6 +86,73 @@ def build_reply_prompt(
         f"{transcript}\n\n"
         "请输出回复："
     )
+
+
+def _build_extraction_prompt(
+    messages: list[dict], reply: str, max_messages: int = 20
+) -> str:
+    """构造提炼知识库条目的 prompt，要求模型只输出 JSON。"""
+    useful = [m for m in messages if str(m.get("content", "")).strip()]
+    selected = useful[-max_messages:]
+    transcript = "\n".join(_format_message(m) for m in selected)
+    return (
+        "你是知识库整理助手。请根据下面的聊天记录和候选回复，提炼出结构化的知识库条目。\n\n"
+        "严格只输出一个 JSON 对象，不输出任何其他文字，格式：\n"
+        '{"title": "简短标题（10字以内）", '
+        '"scenario": "适用场景描述（20字以内）", '
+        '"tags": ["标签1", "标签2"]}\n\n'
+        f"聊天记录：\n{transcript}\n\n"
+        f"候选回复：\n{reply}\n\n"
+        "输出 JSON："
+    )
+
+
+def extract_kb_entry(
+    messages: list[dict],
+    reply: str,
+    config: AIReplyConfig | None = None,
+) -> dict | None:
+    """
+    根据聊天记录和候选回复提炼结构化知识库条目。
+    返回 {"title": ..., "scenario": ..., "tags": [...]}。
+    任何错误（超时、解析失败、命令不存在）均返回 None，由调用方降级处理。
+    注意：此调用始终使用 --tools ""（不读 vault），与 generate_reply 的 KB 模式不同。
+    """
+    config = config or AIReplyConfig()
+    prompt = _build_extraction_prompt(messages, reply, max_messages=config.max_messages)
+    cmd = [
+        config.command, "--code", "-p",
+        "--tools", "",
+        "--no-session-persistence",
+        prompt,
+    ]
+    # Note: config.args is intentionally bypassed here — this call must always use
+    # --tools "" (no file access). Using config.args risks inheriting --add-dir if
+    # the caller's config has KB enabled.
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.timeout,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    text = (result.stdout or "").strip()
+    # 去除可能的 Markdown 代码块包装（```json ... ```）
+    if text.startswith("```"):
+        lines = [ln for ln in text.splitlines() if not ln.startswith("```")]
+        text = "\n".join(lines).strip()
+
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) -> str:
