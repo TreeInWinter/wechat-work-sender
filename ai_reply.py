@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import os
 import shutil
 import subprocess
@@ -117,8 +118,6 @@ def extract_kb_entry(
     任何错误（超时、解析失败、命令不存在）均返回 None，由调用方降级处理。
     注意：此调用始终使用 --tools ""（不读 vault），与 generate_reply 的 KB 模式不同。
     """
-    import json
-
     config = config or AIReplyConfig()
     prompt = _build_extraction_prompt(messages, reply, max_messages=config.max_messages)
     cmd = [
@@ -127,6 +126,9 @@ def extract_kb_entry(
         "--no-session-persistence",
         prompt,
     ]
+    # Note: config.args is intentionally bypassed here — this call must always use
+    # --tools "" (no file access). Using config.args risks inheriting --add-dir if
+    # the caller's config has KB enabled.
     try:
         result = subprocess.run(
             cmd,

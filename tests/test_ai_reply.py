@@ -174,6 +174,12 @@ class ExtractKBEntryTests(unittest.TestCase):
         result = extract_kb_entry([{"content": "询问进度"}], "您好", config)
         self.assertIsNone(result)
 
+    @patch("ai_reply.subprocess.run", side_effect=FileNotFoundError)
+    def test_returns_none_when_command_not_found(self, _run_mock):
+        config = AIReplyConfig(command="nonexistent-cmd", timeout=5)
+        result = extract_kb_entry([{"content": "test"}], "reply", config)
+        self.assertIsNone(result)
+
     @patch("ai_reply.subprocess.run")
     def test_returns_none_on_nonzero_exit(self, run_mock):
         run_mock.return_value = subprocess.CompletedProcess(
