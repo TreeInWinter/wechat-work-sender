@@ -1551,6 +1551,149 @@ class WXSenderApp:
         )
         self._show_kb_save_dialog(entry_dict or {}, reply, source_name)
 
+    def _show_kb_save_dialog(
+        self, entry_dict: dict, reply: str, source_name: str
+    ):
+        """
+        弹出 KB 条目编辑弹窗。
+        entry_dict: AI 提炼结果（可能为空 {}），含 title/scenario/tags 键。
+        reply: 候选回复原文（预填回复内容字段）。
+        source_name: IM 客户端名称（只读展示）。
+        """
+        self.root.attributes("-topmost", False)
+        win = ctk.CTkToplevel(self.root)
+        win.title("存入知识库")
+        win.geometry("420x400")
+        win.resizable(False, False)
+        win.lift()
+        win.focus_force()
+        win.grab_set()
+        win.attributes("-topmost", True)
+
+        # ── Header ──────────────────────────────────────────────────────────
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color="#7c3aed")
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        ctk.CTkLabel(
+            header, text="💾  存入知识库", text_color="white",
+            font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
+        ).pack(side="left", padx=14, pady=10)
+
+        # ── Body ─────────────────────────────────────────────────────────────
+        body = ctk.CTkScrollableFrame(win, fg_color="white", corner_radius=0)
+        body.pack(fill="both", expand=True)
+
+        LABEL_FONT = ctk.CTkFont(family="PingFang SC", size=11)
+        ENTRY_FONT = ctk.CTkFont(family="PingFang SC", size=12)
+
+        def labeled_row(parent, label_text):
+            """返回 row_frame，便于后续 pack 子控件。"""
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", padx=16, pady=(8, 0))
+            ctk.CTkLabel(
+                row, text=label_text, font=LABEL_FONT,
+                text_color="#555", anchor="w",
+            ).pack(fill="x")
+            return row
+
+        # 标题
+        labeled_row(body, "标题")
+        title_var = ctk.StringVar(value=entry_dict.get("title", ""))
+        ctk.CTkEntry(
+            body, textvariable=title_var, height=32, corner_radius=6,
+            border_width=1, border_color="#dce8ff", font=ENTRY_FONT,
+        ).pack(fill="x", padx=16, pady=(3, 0))
+
+        # 适用场景
+        labeled_row(body, "适用场景")
+        scenario_box = ctk.CTkTextbox(
+            body, height=52, corner_radius=6, border_width=1,
+            border_color="#dce8ff", font=ENTRY_FONT,
+        )
+        scenario_box.pack(fill="x", padx=16, pady=(3, 0))
+        scenario_box.insert("end", entry_dict.get("scenario", ""))
+
+        # 标签（逗号分隔）
+        labeled_row(body, "标签（逗号分隔）")
+        tags_raw = ", ".join(entry_dict.get("tags", []))
+        tags_var = ctk.StringVar(value=tags_raw)
+        ctk.CTkEntry(
+            body, textvariable=tags_var, height=32, corner_radius=6,
+            border_width=1, border_color="#dce8ff", font=ENTRY_FONT,
+        ).pack(fill="x", padx=16, pady=(3, 0))
+
+        # 回复内容
+        labeled_row(body, "回复内容")
+        reply_box = ctk.CTkTextbox(
+            body, height=80, corner_radius=6, border_width=1,
+            border_color="#dce8ff", font=ENTRY_FONT,
+        )
+        reply_box.pack(fill="x", padx=16, pady=(3, 0))
+        reply_box.insert("end", reply)
+
+        # 来源（只读）
+        labeled_row(body, "来源")
+        ctk.CTkLabel(
+            body, text=source_name, font=ENTRY_FONT,
+            text_color="#888", anchor="w",
+        ).pack(fill="x", padx=20, pady=(3, 0))
+
+        # ── Footer ───────────────────────────────────────────────────────────
+        footer = ctk.CTkFrame(win, fg_color="white", height=56, corner_radius=0)
+        footer.pack(fill="x", side="bottom")
+        footer.pack_propagate(False)
+        footer.grid_columnconfigure((0, 1), weight=1)
+
+        def on_cancel():
+            win.destroy()
+            self.root.attributes("-topmost", True)
+
+        def on_save():
+            title_val = title_var.get().strip()
+            if not title_val:
+                self._show_warning("标题不能为空")
+                return
+
+            scenario_val = scenario_box.get("1.0", "end").strip()
+            tags_val = [t.strip() for t in tags_var.get().split(",") if t.strip()]
+            reply_val = reply_box.get("1.0", "end").strip()
+            vault_path = self._app_config.get("kb_vault_path", "")
+
+            from datetime import date
+            entry = KBEntry(
+                title=title_val,
+                scenario=scenario_val,
+                tags=tags_val,
+                reply=reply_val,
+                source=source_name,
+                date=date.today().isoformat(),
+            )
+            try:
+                saved_path = save_to_vault(entry, vault_path)
+                filename = os.path.basename(saved_path)
+                win.destroy()
+                self.root.attributes("-topmost", True)
+                self._ai_set_status(f"✅ 已存入知识库：{filename}")
+            except OSError as exc:
+                self._show_warning(f"写入失败：{exc}")
+
+        win.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        ctk.CTkButton(
+            footer, text="取消", height=36, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            command=on_cancel,
+        ).grid(row=0, column=0, padx=(12, 4), pady=10, sticky="ew")
+
+        ctk.CTkButton(
+            footer, text="保存到 Vault", height=36, corner_radius=8,
+            fg_color="#7c3aed", hover_color="#6d28d9",
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=on_save,
+        ).grid(row=0, column=1, padx=(4, 12), pady=10, sticky="ew")
+
     def _refresh_cards(self):
         for widget in self.cards_frame.winfo_children():
             widget.destroy()
