@@ -1651,7 +1651,9 @@ class WXSenderApp:
         def on_save():
             title_val = title_var.get().strip()
             if not title_val:
+                win.grab_release()
                 self._show_warning("标题不能为空")
+                win.grab_set()
                 return
 
             scenario_val = scenario_box.get("1.0", "end").strip()
@@ -1675,7 +1677,13 @@ class WXSenderApp:
                 self.root.attributes("-topmost", True)
                 self._ai_set_status(f"✅ 已存入知识库：{filename}")
             except OSError as exc:
+                win.grab_release()
                 self._show_warning(f"写入失败：{exc}")
+                win.grab_set()
+            except Exception as exc:
+                self._show_warning(f"保存异常：{exc}")
+                win.destroy()
+                self.root.attributes("-topmost", True)
 
         win.protocol("WM_DELETE_WINDOW", on_cancel)
 
