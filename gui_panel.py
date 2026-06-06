@@ -42,7 +42,9 @@ from ai_reply import (
     AIEmptyResponseError,
     AIReplyConfig,
     generate_reply,
+    extract_kb_entry,
 )
+from kb_writer import KBEntry, save_to_vault
 from config import load_config, save_config
 
 # 颜色常量
@@ -1095,12 +1097,27 @@ class WXSenderApp:
             command=self._ai_clear_reply,
         ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
+        send_row = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        send_row.pack(fill="x", padx=12, pady=(0, 10))
+        send_row.grid_columnconfigure(0, weight=3)
+        send_row.grid_columnconfigure(1, weight=2)
+
         ctk.CTkButton(
-            self.ai_view, text="确认发送", height=36, corner_radius=10,
+            send_row, text="确认发送", height=36, corner_radius=10,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=self._ai_send_reply,
-        ).pack(fill="x", padx=12, pady=(0, 10))
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        self.ai_save_btn = ctk.CTkButton(
+            send_row, text="💾 存入知识库", height=36, corner_radius=10,
+            fg_color="transparent", border_width=1, border_color="#7c3aed",
+            text_color="#7c3aed", hover_color="#f5f0ff",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            state="disabled",
+            command=self._ai_kb_capture_async,
+        )
+        self.ai_save_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
     def _update_kb_row(self):
         """根据当前配置刷新知识库状态行外观。"""
@@ -1307,6 +1324,10 @@ class WXSenderApp:
     def _ai_set_reply(self, text: str):
         self.ai_reply_box.delete("1.0", "end")
         self.ai_reply_box.insert("end", text)
+        if hasattr(self, "ai_save_btn"):
+            self.ai_save_btn.configure(
+                state="normal" if text.strip() else "disabled"
+            )
 
     def _ai_get_reply(self) -> str:
         return self.ai_reply_box.get("1.0", "end").strip()
@@ -1488,6 +1509,41 @@ class WXSenderApp:
             self._show_warning("请先生成或输入回复内容")
             return
         self._do_send(reply)
+
+    # ── KB 存储 ──────────────────────────────────────────────────────────────
+
+    def _ai_kb_capture_async(self):
+        """点击「存入知识库」后：校验配置，启动后台提炼线程。"""
+        vault_path = self._app_config.get("kb_vault_path", "")
+        if not vault_path:
+            self._show_warning("请先在 ⚙ 设置中配置知识库路径")
+            return
+
+        reply = self._ai_get_reply()
+        if not reply:
+            return  # 按钮本应 disabled，防御性检查
+
+        self.ai_save_btn.configure(state="disabled", text="提炼中…")
+        msgs = list(self._ai_messages)  # 快照，防止线程读写竞争
+
+        ai_config = AIReplyConfig(
+            kb_enabled=False,  # 提炼任务不需要读 vault
+            kb_vault_path="",
+        )
+
+        def extract_task():
+            entry_dict = extract_kb_entry(msgs, reply, ai_config)
+            self.root.after(0, lambda: self._ai_kb_capture_done(entry_dict, reply))
+
+        threading.Thread(target=extract_task, daemon=True).start()
+
+    def _ai_kb_capture_done(self, entry_dict: dict | None, reply: str):
+        """提炼完成（或失败）后恢复按钮并弹出编辑弹窗。"""
+        self.ai_save_btn.configure(state="normal", text="💾 存入知识库")
+        source_name = (
+            self.current_client.display_name if self.current_client else "未知来源"
+        )
+        self._show_kb_save_dialog(entry_dict or {}, reply, source_name)
 
     def _refresh_cards(self):
         for widget in self.cards_frame.winfo_children():
