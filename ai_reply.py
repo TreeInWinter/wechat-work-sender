@@ -22,7 +22,7 @@ class AICommandTimeoutError(AIReplyError):
 
 
 class AICommandFailedError(AIReplyError):
-    """AI command exited with a non-zero status."""
+    """AI command exited with a non-zero status, or a pre-flight config check failed."""
 
 
 class AIEmptyResponseError(AIReplyError):
@@ -47,6 +47,8 @@ class AIReplyConfig:
     )
     timeout: int = 60
     max_messages: int = 20
+    kb_enabled: bool = False
+    kb_vault_path: str = ""
 
 
 def _format_message(message: dict) -> str:
@@ -59,11 +61,20 @@ def _format_message(message: dict) -> str:
     return f"{sender}: {content}"
 
 
-def build_reply_prompt(messages: list[dict], max_messages: int = 20) -> str:
+def build_reply_prompt(
+    messages: list[dict], max_messages: int = 20, kb_enabled: bool = False
+) -> str:
     useful = [m for m in messages if str(m.get("content", "")).strip()]
     selected = useful[-max_messages:]
     transcript = "\n".join(_format_message(m) for m in selected)
+    kb_preamble = (
+        "你可以访问本地知识库目录中的文档。请先根据聊天内容在知识库中检索相关文档，"
+        "结合检索结果和聊天上下文，生成一段可以直接发送的中文回复。\n\n"
+        if kb_enabled
+        else ""
+    )
     return (
+        f"{kb_preamble}"
         "你是 IM 聊天回复助手。请根据下面最近的聊天记录，生成一段可以直接发送的中文回复。\n\n"
         "要求：\n"
         "1. 只输出最终回复正文，不要标题、解释、Markdown 或代码块。\n"
@@ -81,8 +92,30 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
     if not any(str(m.get("content", "")).strip() for m in messages):
         raise AIEmptyResponseError("没有可用于生成回复的聊天内容")
 
-    prompt = build_reply_prompt(messages, max_messages=config.max_messages)
-    cmd = [config.command, *config.args, prompt]
+    if config.kb_enabled:
+        if not config.kb_vault_path:
+            raise AICommandFailedError(
+                "知识库已启用但未配置路径，请在设置中选择 Obsidian vault 文件夹"
+            )
+        if not os.path.isdir(config.kb_vault_path):
+            raise AICommandFailedError(
+                f"知识库路径不存在或不是目录：{config.kb_vault_path}"
+            )
+
+    prompt = build_reply_prompt(
+        messages, max_messages=config.max_messages, kb_enabled=config.kb_enabled
+    )
+    if config.kb_enabled:
+        # KB mode: build command from scratch; config.args is intentionally bypassed
+        # because --tools "" would prevent file reading from the vault.
+        cmd = [
+            config.command, "--code", "-p",
+            "--add-dir", config.kb_vault_path,
+            "--no-session-persistence",
+            prompt,
+        ]
+    else:
+        cmd = [config.command, *config.args, prompt]
     try:
         result = subprocess.run(
             cmd,

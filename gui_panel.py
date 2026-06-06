@@ -40,8 +40,10 @@ from ai_reply import (
     AICommandNotFoundError,
     AICommandTimeoutError,
     AIEmptyResponseError,
+    AIReplyConfig,
     generate_reply,
 )
+from config import load_config, save_config
 
 # 颜色常量
 PRIMARY   = "#1677FF"
@@ -706,6 +708,7 @@ class WXSenderApp:
         self._ai_generating = False
         self._ai_anim_running = False
         self._ai_anim_tick = 0
+        self._app_config = load_config()
         self.clients = discover_clients()
         self.current_client = choose_default_client(self.clients)
         self._client_label_to_id = {}
@@ -748,6 +751,12 @@ class WXSenderApp:
                        hover_color=PRIMARY_H, text_color="white",
                        font=ctk.CTkFont(size=16),
                        command=self._refresh_targets_and_status).pack(side="right", padx=8)
+
+        ctk.CTkButton(status_frame, text="⚙", width=32, height=32,
+                       corner_radius=8, fg_color="transparent",
+                       hover_color=PRIMARY_H, text_color="white",
+                       font=ctk.CTkFont(size=15),
+                       command=self._show_ai_settings).pack(side="right", padx=(0, 2))
 
         ctk.CTkButton(status_frame, text="权限", width=48, height=30,
                        corner_radius=8, fg_color="transparent",
@@ -1016,6 +1025,26 @@ class WXSenderApp:
         )
         self.ai_regenerate_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
+        # ── 知识库状态行 ──
+        self.kb_row = ctk.CTkFrame(
+            self.ai_view, corner_radius=6, border_width=1,
+            fg_color="#fafafa", border_color="#e8e8e8",
+        )
+        self.kb_row.pack(fill="x", padx=12, pady=(0, 4))
+        self.kb_row.pack_propagate(False)
+        self.kb_row.configure(height=26)
+
+        self.kb_row_label = ctk.CTkLabel(
+            self.kb_row, text="📂 知识库未启用 — 点击设置",
+            text_color="#aaa", anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        self.kb_row_label.pack(side="left", padx=8)
+
+        self.kb_row.bind("<Button-1>", lambda e: self._show_ai_settings())
+        self.kb_row_label.bind("<Button-1>", lambda e: self._show_ai_settings())
+        self._update_kb_row()
+
         self.ai_status_label = ctk.CTkLabel(
             self.ai_view, text="选中当前接管对象聊天后，读取会话并生成回复。",
             text_color="#8c8c8c", anchor="w",
@@ -1041,10 +1070,10 @@ class WXSenderApp:
         ).pack(fill="x", padx=14, pady=(4, 4))
 
         self.ai_reply_box = ctk.CTkTextbox(
-            self.ai_view, height=160, corner_radius=8, border_width=1,
+            self.ai_view, height=110, corner_radius=8, border_width=1,
             border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=12),
         )
-        self.ai_reply_box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self.ai_reply_box.pack(fill="x", padx=12, pady=(0, 8))
 
         utility_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
         utility_frame.pack(fill="x", padx=12, pady=(0, 6))
@@ -1072,6 +1101,199 @@ class WXSenderApp:
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=self._ai_send_reply,
         ).pack(fill="x", padx=12, pady=(0, 10))
+
+    def _update_kb_row(self):
+        """根据当前配置刷新知识库状态行外观。"""
+        cfg = self._app_config
+        if cfg.get("kb_enabled") and cfg.get("kb_vault_path"):
+            vault_name = os.path.basename(cfg["kb_vault_path"]) or cfg["kb_vault_path"]
+            self.kb_row.configure(fg_color="#f6ffed", border_color="#b7eb8f")
+            self.kb_row_label.configure(
+                text=f"📗 知识库已启用 · {vault_name}", text_color="#389e0d"
+            )
+        else:
+            self.kb_row.configure(fg_color="#fafafa", border_color="#e8e8e8")
+            self.kb_row_label.configure(
+                text="📂 知识库未启用 — 点击设置", text_color="#aaa"
+            )
+
+    def _show_ai_settings(self):
+        """弹出 AI 知识库设置窗口。"""
+        self.root.attributes("-topmost", False)
+        win = ctk.CTkToplevel(self.root)
+        win.title("AI 知识库设置")
+        win.geometry("400x210")
+        win.resizable(False, False)
+        win.lift()
+        win.focus_force()
+        win.grab_set()
+        win.attributes("-topmost", True)
+
+        # ── Header ──
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        ctk.CTkLabel(
+            header, text="⚙  AI 知识库设置", text_color="white",
+            font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
+        ).pack(side="left", padx=14, pady=12)
+
+        # ── Body ──
+        body = ctk.CTkFrame(win, fg_color="white", corner_radius=0)
+        body.pack(fill="both", expand=True)
+
+        # 启用开关
+        row1 = ctk.CTkFrame(body, fg_color="transparent")
+        row1.pack(fill="x", padx=16, pady=(14, 6))
+        ctk.CTkLabel(
+            row1, text="启用知识库",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+        ).pack(side="left")
+        kb_var = ctk.BooleanVar(value=bool(self._app_config.get("kb_enabled")))
+        ctk.CTkSwitch(
+            row1, text="", variable=kb_var,
+            onvalue=True, offvalue=False, width=44,
+        ).pack(side="right")
+
+        # Vault 路径
+        row2 = ctk.CTkFrame(body, fg_color="transparent")
+        row2.pack(fill="x", padx=16, pady=(0, 6))
+        ctk.CTkLabel(
+            row2, text="Vault 路径",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            width=72, anchor="w",
+        ).pack(side="left")
+        path_var = ctk.StringVar(value=self._app_config.get("kb_vault_path", ""))
+        path_entry = ctk.CTkEntry(
+            row2, textvariable=path_var,
+            height=30, corner_radius=6, border_width=1,
+            border_color="#dce8ff",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            state="disabled",
+        )
+        path_entry.pack(side="left", fill="x", expand=True, padx=(6, 6))
+
+        def browse():
+            from tkinter import filedialog
+            win.grab_release()
+            chosen = filedialog.askdirectory(
+                title="选择 Obsidian Vault 文件夹",
+                parent=win,
+            )
+            win.grab_set()
+            if chosen:
+                path_var.set(chosen)
+
+        ctk.CTkButton(
+            row2, text="浏览…", width=60, height=30, corner_radius=6,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=11),
+            command=browse,
+        ).pack(side="right")
+
+        # ── Footer ──
+        footer = ctk.CTkFrame(body, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(4, 14))
+        footer.grid_columnconfigure((0, 1), weight=1)
+
+        def on_save():
+            if kb_var.get() and not path_var.get():
+                self._show_warning("请先选择 Obsidian Vault 路径")
+                return
+            self._app_config["kb_enabled"] = kb_var.get()
+            self._app_config["kb_vault_path"] = path_var.get()
+            try:
+                save_config(self._app_config)
+            except OSError as e:
+                self._show_warning(f"保存失败：{e}")
+                return
+            self._app_config = load_config()
+            self._update_kb_row()
+            win.destroy()
+            self.root.attributes("-topmost", True)
+
+        def on_cancel():
+            win.destroy()
+            self.root.attributes("-topmost", True)
+
+        win.protocol("WM_DELETE_WINDOW", on_cancel)
+
+        ctk.CTkButton(
+            footer, text="取消", height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            command=on_cancel,
+        ).grid(row=0, column=0, padx=(0, 5), sticky="ew")
+
+        ctk.CTkButton(
+            footer, text="保存", height=32, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            command=on_save,
+        ).grid(row=0, column=1, padx=(5, 0), sticky="ew")
+
+    # ── 生成中动效 ───────────────────────────────────────────
+
+    @staticmethod
+    def _lerp_color(c1: str, c2: str, t: float) -> str:
+        """在两个 #rrggbb 颜色间线性插值。"""
+        r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+        r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+        return "#{:02x}{:02x}{:02x}".format(
+            round(r1 + (r2 - r1) * t),
+            round(g1 + (g2 - g1) * t),
+            round(b1 + (b2 - b1) * t),
+        )
+
+    def _ai_start_loading_anim(self):
+        """启动候选回复文本框的 AI 生成动效（边框呼吸 + 框内光标闪烁）。"""
+        self._ai_anim_running = True
+        self._ai_anim_tick = 0
+        tb = self.ai_reply_box._textbox
+        tb.tag_configure("anim_dot",  foreground=PRIMARY)
+        tb.tag_configure("anim_msg",  foreground="#a8bedc")
+        tb.tag_configure("anim_cur",  foreground=PRIMARY)
+        self._ai_anim_step()
+
+    def _ai_stop_loading_anim(self):
+        """停止动效，恢复边框颜色，清空占位文字，恢复文本框可编辑。"""
+        self._ai_anim_running = False
+        self.ai_reply_box.configure(border_color="#dce8ff")
+        # 恢复底层 tk.Text 为可编辑（_ai_anim_step 最后一次 tick 可能将其设为 disabled）
+        self.ai_reply_box._textbox.configure(state="normal")
+        self.ai_reply_box.delete("1.0", "end")
+
+    def _ai_anim_step(self):
+        if not self._ai_anim_running:
+            return
+        n = self._ai_anim_tick
+
+        # 边框呼吸：正弦波，周期 28 tick = 1.4s（50ms/tick）
+        t_border = (math.sin(n * math.pi / 14) + 1) / 2
+        self.ai_reply_box.configure(
+            border_color=self._lerp_color("#dce8ff", "#1677ff", t_border)
+        )
+
+        # 框内占位文字：彩色点 + 提示文字 + 闪烁光标
+        t_dot = (math.sin(n * math.pi / 10) + 1) / 2
+        dot_color = self._lerp_color("#a0c4ff", "#1677ff", t_dot)
+        cursor_char = "▋" if (n // 9) % 2 == 0 else " "
+
+        tb = self.ai_reply_box._textbox
+        tb.configure(state="normal")
+        tb.delete("1.0", "end")
+        tb.tag_configure("anim_dot", foreground=dot_color)
+        tb.insert("end", "⬤ ", "anim_dot")
+        tb.insert("end", "AI 正在生成回复", "anim_msg")
+        tb.insert("end", cursor_char, "anim_cur")
+        tb.configure(state="disabled")
+
+        self._ai_anim_tick += 1
+        self.root.after(50, self._ai_anim_step)
+
+    # ─────────────────────────────────────────────────────────
 
     def _ai_set_status(self, text: str):
         self.ai_status_label.configure(text=text)
@@ -1209,9 +1431,14 @@ class WXSenderApp:
         self._ai_set_status("正在调用 AI 生成回复...")
         self._ai_start_loading_anim()
 
+        ai_config = AIReplyConfig(
+            kb_enabled=self._app_config.get("kb_enabled", False),
+            kb_vault_path=self._app_config.get("kb_vault_path", ""),
+        )
+
         def generate_task():
             try:
-                reply = generate_reply(msgs)
+                reply = generate_reply(msgs, ai_config)
                 self.root.after(0, lambda: self._ai_generation_done(reply))
             except (
                 AICommandNotFoundError,
