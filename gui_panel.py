@@ -55,6 +55,25 @@ except ImportError:
     _kb_get_db_path = None
     _sqlite3 = None
 
+
+def _vault_is_indexed(vault_path: str) -> bool:
+    """返回 True 当且仅当索引中已有属于 vault_path 的记录。"""
+    if not _kb_get_db_path or not _sqlite3:
+        return False
+    try:
+        db = _kb_get_db_path()
+        if not os.path.exists(db):
+            return False
+        conn = _sqlite3.connect(db)
+        n = conn.execute(
+            "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
+            (vault_path.rstrip("/") + "/%",),
+        ).fetchone()[0]
+        conn.close()
+        return n > 0
+    except Exception:
+        return False
+
 # 颜色常量
 PRIMARY   = "#1677FF"
 PRIMARY_H = "#0958d9"   # hover
@@ -1139,7 +1158,11 @@ class WXSenderApp:
                     db = _kb_get_db_path()
                     if os.path.exists(db):
                         conn = _sqlite3.connect(db)
-                        n = conn.execute("SELECT COUNT(*) FROM kb_meta").fetchone()[0]
+                        vault = cfg["kb_vault_path"].rstrip("/")
+                        n = conn.execute(
+                            "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
+                            (vault + "/%",),
+                        ).fetchone()[0]
                         conn.close()
                         count_str = f"  ({n} 条)"
                 except Exception:
@@ -1232,7 +1255,31 @@ class WXSenderApp:
         # ── Footer ──
         footer = ctk.CTkFrame(body, fg_color="transparent")
         footer.pack(fill="x", padx=16, pady=(4, 14))
-        footer.grid_columnconfigure((0, 1), weight=1)
+        footer.grid_columnconfigure((0, 1, 2), weight=1)
+
+        def _start_rebuild_ui(target_path: str) -> None:
+            """关闭设置窗口，弹出进度提示，后台重建索引。"""
+            win.destroy()
+            self.root.attributes("-topmost", False)
+            progress_win = ctk.CTkToplevel(self.root)
+            progress_win.title("建立索引")
+            progress_win.geometry("300x80")
+            progress_win.resizable(False, False)
+            progress_win.attributes("-topmost", True)
+            ctk.CTkLabel(progress_win, text="正在建立知识库索引…").pack(expand=True)
+
+            def do_rebuild():
+                try:
+                    _kb_rebuild(target_path)
+                except Exception:
+                    pass
+                self.root.after(0, lambda: (
+                    progress_win.destroy(),
+                    self.root.attributes("-topmost", True),
+                    self._update_kb_row(),
+                ))
+
+            threading.Thread(target=do_rebuild, daemon=True).start()
 
         def on_save():
             if kb_var.get() and not path_var.get():
@@ -1252,33 +1299,34 @@ class WXSenderApp:
             self._app_config = load_config()
             self._update_kb_row()
 
-            # 路径变更或首次启用时，重建索引
-            if new_enabled and new_path and new_path != old_path and _kb_rebuild:
-                win.destroy()
-                self.root.attributes("-topmost", False)
-                progress_win = ctk.CTkToplevel(self.root)
-                progress_win.title("建立索引")
-                progress_win.geometry("300x80")
-                progress_win.resizable(False, False)
-                progress_win.attributes("-topmost", True)
-                lbl = ctk.CTkLabel(progress_win, text="正在建立知识库索引…")
-                lbl.pack(expand=True)
-
-                def do_rebuild():
-                    try:
-                        _kb_rebuild(new_path)
-                    except Exception:
-                        pass
-                    self.root.after(0, lambda: (
-                        progress_win.destroy(),
-                        self.root.attributes("-topmost", True),
-                        self._update_kb_row(),
-                    ))
-
-                threading.Thread(target=do_rebuild, daemon=True).start()
+            # 路径变更 或 当前 vault 从未被索引时，重建索引
+            needs_rebuild = (
+                new_enabled and new_path and _kb_rebuild
+                and (new_path != old_path or not _vault_is_indexed(new_path))
+            )
+            if needs_rebuild:
+                _start_rebuild_ui(new_path)
             else:
                 win.destroy()
                 self.root.attributes("-topmost", True)
+
+        def on_rebuild():
+            """手动重建索引按钮回调。"""
+            cur_path = path_var.get().strip()
+            if not cur_path:
+                self._show_warning("请先选择 Obsidian Vault 路径")
+                return
+            if not _kb_rebuild:
+                return
+            # 先保存当前设置再重建
+            self._app_config["kb_enabled"] = kb_var.get()
+            self._app_config["kb_vault_path"] = cur_path
+            try:
+                save_config(self._app_config)
+            except OSError:
+                pass
+            self._app_config = load_config()
+            _start_rebuild_ui(cur_path)
 
         def on_cancel():
             win.destroy()
@@ -1287,19 +1335,27 @@ class WXSenderApp:
         win.protocol("WM_DELETE_WINDOW", on_cancel)
 
         ctk.CTkButton(
+            footer, text="重建索引", height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#555", hover_color="#f0f0f0",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            command=on_rebuild,
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        ctk.CTkButton(
             footer, text="取消", height=32, corner_radius=8,
             fg_color="transparent", border_width=1, border_color="#d9d9d9",
             text_color="#666", hover_color="#f0f0f0",
             font=ctk.CTkFont(family="PingFang SC", size=12),
             command=on_cancel,
-        ).grid(row=0, column=0, padx=(0, 5), sticky="ew")
+        ).grid(row=0, column=1, padx=(4, 4), sticky="ew")
 
         ctk.CTkButton(
             footer, text="保存", height=32, corner_radius=8,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=on_save,
-        ).grid(row=0, column=1, padx=(5, 0), sticky="ew")
+        ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
 
     # ── 生成中动效 ───────────────────────────────────────────
 

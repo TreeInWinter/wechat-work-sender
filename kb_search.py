@@ -47,7 +47,7 @@ def _open_db(db_path: str) -> sqlite3.Connection:
             tags,
             scenario,
             body,
-            tokenize="unicode61"
+            tokenize="trigram"
         );
     """)
     conn.commit()
@@ -114,9 +114,25 @@ def rebuild_index(vault_path: str, db_path: str | None = None) -> int:
     db_path = db_path or get_db_path()
     conn = _open_db(db_path)
     try:
-        # 清空旧数据
-        conn.execute("DELETE FROM kb_fts")
-        conn.execute("DELETE FROM kb_meta")
+        # DROP 旧 FTS 表后重建，确保 tokenizer 设置生效
+        conn.executescript("""
+            DROP TABLE IF EXISTS kb_fts;
+            DROP TABLE IF EXISTS kb_meta;
+        """)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS kb_meta (
+                path TEXT PRIMARY KEY,
+                mtime REAL
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(
+                path UNINDEXED,
+                title,
+                tags,
+                scenario,
+                body,
+                tokenize="trigram"
+            );
+        """)
         conn.commit()
 
         count = 0
@@ -178,46 +194,87 @@ def update_index(vault_path: str, db_path: str | None = None) -> tuple[int, int]
         conn.close()
 
 
+def _like_search(
+    conn: sqlite3.Connection,
+    term: str,
+    top_k: int,
+) -> list[tuple]:
+    """用 LIKE 实现子串匹配，供短查询（< 3 字）兜底。"""
+    pat = f"%{term}%"
+    return conn.execute(
+        """
+        SELECT path, title, scenario, tags,
+               SUBSTR(body, 1, 120) AS snip,
+               1.0 AS score
+        FROM kb_fts
+        WHERE title LIKE ? OR tags LIKE ? OR scenario LIKE ? OR body LIKE ?
+        LIMIT ?
+        """,
+        (pat, pat, pat, pat, top_k),
+    ).fetchall()
+
+
 def search(
     query: str,
     vault_path: str,
     top_k: int = 15,
     db_path: str | None = None,
 ) -> list[SearchResult]:
-    """FTS5 检索，返回 Top-K 结果。db 不存在或出错时返回空列表。"""
+    """FTS5 trigram 检索，返回 Top-K 结果。
+    - 3 字以上词：FTS5 MATCH（支持中文子串）
+    - 不足 3 字：LIKE 兜底
+    - db 不存在或出错时返回空列表。
+    """
     db_path = db_path or get_db_path()
     if not os.path.exists(db_path):
         return []
 
-    # FTS5 查询需要转义特殊字符，简单处理：去掉引号
-    safe_query = query.replace('"', " ").strip()
+    # 清理特殊字符（trigram 模式下引号会造成语法错误）
+    safe_query = query.replace('"', " ").replace("'", " ").strip()
     if not safe_query:
         return []
 
     try:
         conn = _open_db(db_path)
         try:
-            rows = conn.execute(
-                """
-                SELECT
-                    path,
-                    title,
-                    scenario,
-                    tags,
-                    snippet(kb_fts, 4, '[', ']', '...', 10) AS snip,
-                    -rank AS score
-                FROM kb_fts
-                WHERE kb_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (safe_query, top_k),
-            ).fetchall()
+            rows: list[tuple] = []
+            # trigram 要求每个 term 至少 3 字符；提取满足条件的词
+            terms = safe_query.split()
+            fts_terms = [t for t in terms if len(t) >= 3]
+
+            if fts_terms:
+                fts_query = " ".join(fts_terms)
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            path,
+                            title,
+                            scenario,
+                            tags,
+                            snippet(kb_fts, 4, '[', ']', '...', 10) AS snip,
+                            -rank AS score
+                        FROM kb_fts
+                        WHERE kb_fts MATCH ?
+                        ORDER BY rank
+                        LIMIT ?
+                        """,
+                        (fts_query, top_k),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+
+            # 对长度不足 3 的词补充 LIKE 搜索
+            short_terms = [t for t in terms if 0 < len(t) < 3]
+            existing_paths = {r[0] for r in rows}
+            for st in short_terms:
+                for row in _like_search(conn, st, top_k):
+                    if row[0] not in existing_paths:
+                        rows.append(row)
+                        existing_paths.add(row[0])
+
         finally:
             conn.close()
-    except sqlite3.OperationalError:
-        # 查询语法错误（如特殊符号）→ 降级为空
-        return []
     except Exception:
         return []
 
@@ -232,4 +289,4 @@ def search(
             snippet=snip or "",
             score=float(score),
         ))
-    return results
+    return results[:top_k]
