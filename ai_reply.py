@@ -220,11 +220,14 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
             args=(config.kb_vault_path,),
             daemon=True,
         ).start()
-        # 同步 FTS5 粗筛
+        # 同步 FTS5 粗筛；任何意外异常均降级为 --add-dir
         query = _extract_query(messages)
-        search_results = search(query, config.kb_vault_path)
+        try:
+            search_results = search(query, config.kb_vault_path)
+        except Exception:
+            search_results = []
         if not search_results:
-            use_add_dir = True  # 检索为空，降级
+            use_add_dir = True  # 检索为空或出错，降级
 
     prompt = build_reply_prompt(
         messages,
