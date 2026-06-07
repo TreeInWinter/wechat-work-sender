@@ -130,3 +130,47 @@ def rebuild_index(vault_path: str, db_path: str | None = None) -> int:
         return count
     finally:
         conn.close()
+
+
+def update_index(vault_path: str, db_path: str | None = None) -> tuple[int, int]:
+    """增量更新索引。返回 (新增/更新数, 删除数)。"""
+    db_path = db_path or get_db_path()
+    # 如果 db 不存在，走全量重建
+    if not os.path.exists(db_path):
+        count = rebuild_index(vault_path, db_path=db_path)
+        return count, 0
+
+    conn = _open_db(db_path)
+    try:
+        # 读取现有路径→mtime 映射
+        existing = {
+            row[0]: row[1]
+            for row in conn.execute("SELECT path, mtime FROM kb_meta").fetchall()
+        }
+
+        # 扫描 vault 中所有 md 文件
+        current_paths: set[str] = set()
+        added = 0
+        for root, _, files in os.walk(vault_path):
+            for fname in files:
+                if not fname.endswith(".md"):
+                    continue
+                fpath = os.path.join(root, fname)
+                current_paths.add(fpath)
+                new_mtime = os.path.getmtime(fpath)
+                if fpath not in existing or existing[fpath] != new_mtime:
+                    _index_file(conn, fpath)
+                    added += 1
+
+        # 删除已不存在的文件
+        deleted = 0
+        for old_path in existing:
+            if old_path not in current_paths:
+                conn.execute("DELETE FROM kb_fts WHERE path = ?", (old_path,))
+                conn.execute("DELETE FROM kb_meta WHERE path = ?", (old_path,))
+                deleted += 1
+
+        conn.commit()
+        return added, deleted
+    finally:
+        conn.close()

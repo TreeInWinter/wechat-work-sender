@@ -72,3 +72,53 @@ def test_rebuild_index_raises_on_invalid_vault_path():
     """vault_path 不存在时应抛出 ValueError。"""
     with pytest.raises(ValueError, match="不存在"):
         rebuild_index("/nonexistent/path/that/does/not/exist")
+
+
+from kb_search import update_index
+import time
+from pathlib import Path
+
+
+def test_update_index_adds_new_file(tmp_path):
+    vault = _make_vault(tmp_path, {
+        "first.md": "---\ntitle: 第一\nscenario: 测试\ntags: []\n---\n内容",
+    })
+    db = str(tmp_path / "idx.db")
+    rebuild_index(vault, db_path=db)
+
+    # 新增文件
+    (Path(vault) / "second.md").write_text(
+        "---\ntitle: 第二\nscenario: 新增\ntags: []\n---\n新内容", encoding="utf-8"
+    )
+    added, deleted = update_index(vault, db_path=db)
+    assert added == 1
+    assert deleted == 0
+
+
+def test_update_index_detects_deleted_file(tmp_path):
+    vault = _make_vault(tmp_path, {
+        "keep.md": "---\ntitle: 保留\n---\n内容",
+        "remove.md": "---\ntitle: 删除\n---\n内容",
+    })
+    db = str(tmp_path / "idx.db")
+    rebuild_index(vault, db_path=db)
+
+    os.remove(os.path.join(vault, "remove.md"))
+    added, deleted = update_index(vault, db_path=db)
+    assert added == 0
+    assert deleted == 1
+
+
+def test_update_index_updates_modified_file(tmp_path):
+    md_path = tmp_path / "vault" / "edit.md"
+    (tmp_path / "vault").mkdir()
+    md_path.write_text("---\ntitle: 原始\n---\n旧内容", encoding="utf-8")
+    db = str(tmp_path / "idx.db")
+    rebuild_index(str(tmp_path / "vault"), db_path=db)
+
+    # 修改文件，强制 mtime 变化
+    md_path.write_text("---\ntitle: 更新后\n---\n新内容", encoding="utf-8")
+    os.utime(str(md_path), (os.path.getmtime(str(md_path)) + 1,) * 2)
+    added, deleted = update_index(str(tmp_path / "vault"), db_path=db)
+    assert added == 1   # modified 计入 added
+    assert deleted == 0
