@@ -243,7 +243,8 @@ def search(
             fts_terms = [t for t in terms if len(t) >= 3]
 
             if fts_terms:
-                fts_query = " ".join(fts_terms)
+                # 每个词用双引号包裹，防止 ()+-*^: 等 FTS5 特殊字符触发语法错误
+                fts_query = " ".join(f'"{t}"' for t in fts_terms)
                 try:
                     rows = conn.execute(
                         """

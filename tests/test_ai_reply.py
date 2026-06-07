@@ -101,8 +101,10 @@ class BuildReplyPromptKBTests(unittest.TestCase):
 
 
 class GenerateReplyKBTests(unittest.TestCase):
+    @patch("ai_reply.update_index")
+    @patch("ai_reply.search", return_value=[])   # 空结果 → 降级 --add-dir
     @patch("ai_reply.subprocess.run")
-    def test_kb_enabled_uses_add_dir_and_no_tools_flag(self, run_mock):
+    def test_kb_enabled_uses_add_dir_and_no_tools_flag(self, run_mock, _mock_search, _mock_update):
         run_mock.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="回复内容", stderr=""
         )
@@ -276,7 +278,7 @@ def test_generate_reply_uses_add_file_when_search_results_found(tmp_path):
 
     with patch("ai_reply.search") as mock_search, \
          patch("ai_reply.update_index"), \
-         patch("subprocess.run", return_value=fake_result) as mock_run:
+         patch("ai_reply.subprocess.run", return_value=fake_result) as mock_run:
 
         mock_search.return_value = [
             SearchResult(path=md_file, title="订单查询", scenario="测试", tags=[], snippet="", score=1.0)
@@ -301,7 +303,7 @@ def test_generate_reply_fallback_to_add_dir_when_search_empty(tmp_path):
 
     with patch("ai_reply.search", return_value=[]), \
          patch("ai_reply.update_index"), \
-         patch("subprocess.run", return_value=fake_result) as mock_run:
+         patch("ai_reply.subprocess.run", return_value=fake_result) as mock_run:
 
         config = AIReplyConfig(kb_enabled=True, kb_vault_path=vault)
         generate_reply(_make_msgs(), config)

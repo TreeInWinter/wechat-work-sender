@@ -65,12 +65,14 @@ def _vault_is_indexed(vault_path: str) -> bool:
         if not os.path.exists(db):
             return False
         conn = _sqlite3.connect(db)
-        n = conn.execute(
-            "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
-            (vault_path.rstrip("/") + "/%",),
-        ).fetchone()[0]
-        conn.close()
-        return n > 0
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
+                (vault_path.rstrip("/") + "/%",),
+            ).fetchone()[0]
+            return n > 0
+        finally:
+            conn.close()
     except Exception:
         return False
 
@@ -1158,13 +1160,15 @@ class WXSenderApp:
                     db = _kb_get_db_path()
                     if os.path.exists(db):
                         conn = _sqlite3.connect(db)
-                        vault = cfg["kb_vault_path"].rstrip("/")
-                        n = conn.execute(
-                            "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
-                            (vault + "/%",),
-                        ).fetchone()[0]
-                        conn.close()
-                        count_str = f"  ({n} 条)"
+                        try:
+                            vault = cfg["kb_vault_path"].rstrip("/")
+                            n = conn.execute(
+                                "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
+                                (vault + "/%",),
+                            ).fetchone()[0]
+                            count_str = f"  ({n} 条)"
+                        finally:
+                            conn.close()
                 except Exception:
                     pass
             self.kb_row.configure(fg_color="#f6ffed", border_color="#b7eb8f")
@@ -1266,20 +1270,35 @@ class WXSenderApp:
             progress_win.withdraw()
             progress_win.title("建立索引")
             progress_win.resizable(False, False)
-            self._center_on_root(progress_win, 300, 80)
+            self._center_on_root(progress_win, 320, 80)
             progress_win.attributes("-topmost", True)
-            ctk.CTkLabel(progress_win, text="正在建立知识库索引…").pack(expand=True)
+            progress_win.grab_set()
+            prog_lbl = ctk.CTkLabel(progress_win, text="正在建立知识库索引…")
+            prog_lbl.pack(expand=True)
 
             def do_rebuild():
+                err = None
                 try:
                     _kb_rebuild(target_path)
-                except Exception:
-                    pass
-                self.root.after(0, lambda: (
-                    progress_win.destroy(),
-                    self.root.attributes("-topmost", True),
-                    self._update_kb_row(),
-                ))
+                except Exception as e:
+                    err = str(e)
+
+                def on_done():
+                    self._update_kb_row()
+                    if err:
+                        prog_lbl.configure(
+                            text=f"❌ 重建失败：{err[:50]}", text_color="#cf1322"
+                        )
+                        # 3s 后自动关闭
+                        self.root.after(3000, lambda: (
+                            progress_win.destroy(),
+                            self.root.attributes("-topmost", True),
+                        ))
+                    else:
+                        progress_win.destroy()
+                        self.root.attributes("-topmost", True)
+
+                self.root.after(0, on_done)
 
             threading.Thread(target=do_rebuild, daemon=True).start()
 

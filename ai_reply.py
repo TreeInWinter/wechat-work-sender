@@ -215,11 +215,13 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
 
     if config.kb_enabled:
         # 后台异步增量更新索引（不等结果）
-        threading.Thread(
-            target=update_index,
-            args=(config.kb_vault_path,),
-            daemon=True,
-        ).start()
+        def _bg_update(path: str) -> None:
+            try:
+                update_index(path)
+            except Exception:
+                pass  # vault 被删除或 db 锁定时静默忽略，下次调用重试
+
+        threading.Thread(target=_bg_update, args=(config.kb_vault_path,), daemon=True).start()
         # 同步 FTS5 粗筛；任何意外异常均降级为 --add-dir
         query = _extract_query(messages)
         try:
@@ -273,7 +275,8 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
 
     reply = (result.stdout or "").strip()
     if not reply:
-        visible_cmd = " ".join([config.command, *config.args])
+        # 用实际构建的 cmd 前几段（排除 prompt 内容）给出有意义的调试提示
+        visible_cmd = " ".join(cmd[:6])
         raise AIEmptyResponseError(
             f"AI 命令没有输出，请在终端确认可用：{visible_cmd} \"只输出两个字：可以\""
         )
