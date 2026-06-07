@@ -1181,9 +1181,10 @@ class WXSenderApp:
         """弹出 AI 知识库设置窗口。"""
         self.root.attributes("-topmost", False)
         win = ctk.CTkToplevel(self.root)
+        win.withdraw()   # 先隐藏，定位后再显示，防止闪烁
         win.title("AI 知识库设置")
         win.resizable(False, False)
-        self._center_on_root(win, 400, 230)
+        self._center_on_root(win, 400, 230)   # 内部调用 deiconify()
         win.lift()
         win.focus_force()
         win.grab_set()
@@ -1262,6 +1263,7 @@ class WXSenderApp:
             win.destroy()
             self.root.attributes("-topmost", False)
             progress_win = ctk.CTkToplevel(self.root)
+            progress_win.withdraw()
             progress_win.title("建立索引")
             progress_win.resizable(False, False)
             self._center_on_root(progress_win, 300, 80)
@@ -2057,13 +2059,17 @@ class WXSenderApp:
     #   - 警告/确认 → 弹出前临时关闭 topmost，结束后恢复
 
     def _center_on_root(self, win: ctk.CTkToplevel, w: int, h: int) -> None:
-        """将 Toplevel 窗口居中叠放在主窗口上。"""
+        """将 Toplevel 窗口居中叠放在主窗口上，防止先在默认位置闪烁。
+        调用方须在 CTkToplevel() 创建后立即调用 win.withdraw()，
+        本方法定位完成后调用 win.deiconify() 一次性显示在正确位置。
+        """
         self.root.update_idletasks()
         rx, ry = self.root.winfo_x(), self.root.winfo_y()
         rw, rh = self.root.winfo_width(), self.root.winfo_height()
         x = rx + (rw - w) // 2
         y = ry + (rh - h) // 2
         win.geometry(f"{w}x{h}+{x}+{y}")
+        win.deiconify()
 
     def _ask_input(self, title: str, prompt: str) -> str | None:
         """弹出文本输入框，临时关闭 topmost 确保对话框可见且可输入"""
