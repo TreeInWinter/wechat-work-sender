@@ -135,6 +135,8 @@ def rebuild_index(vault_path: str, db_path: str | None = None) -> int:
 def update_index(vault_path: str, db_path: str | None = None) -> tuple[int, int]:
     """增量更新索引。返回 (新增/更新数, 删除数)。"""
     db_path = db_path or get_db_path()
+    if not os.path.isdir(vault_path):
+        raise ValueError(f"vault_path 不存在或不是目录: {vault_path}")
     # 如果 db 不存在，走全量重建
     if not os.path.exists(db_path):
         count = rebuild_index(vault_path, db_path=db_path)
