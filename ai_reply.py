@@ -8,6 +8,15 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+
+try:
+    from kb_search import search, update_index
+except ImportError:
+    def search(*args, **kwargs):  # type: ignore[misc]
+        return []
+    def update_index(*args, **kwargs):  # type: ignore[misc]
+        return 0, 0
 
 
 class AIReplyError(Exception):
@@ -50,6 +59,13 @@ class AIReplyConfig:
     max_messages: int = 20
     kb_enabled: bool = False
     kb_vault_path: str = ""
+
+
+def _extract_query(messages: list[dict], n: int = 3) -> str:
+    """取最后 n 条非空消息的内容拼成查询串。"""
+    useful = [m for m in messages if str(m.get("content", "")).strip()]
+    selected = useful[-n:]
+    return " ".join(str(m.get("content", "")).strip() for m in selected)
 
 
 def _format_message(message: dict) -> str:
@@ -193,18 +209,46 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
                 f"知识库路径不存在或不是目录：{config.kb_vault_path}"
             )
 
-    prompt = build_reply_prompt(
-        messages, max_messages=config.max_messages, kb_enabled=config.kb_enabled
-    )
+    # ── 两级检索 ──
+    search_results = []
+    use_add_dir = False
+
     if config.kb_enabled:
-        # KB mode: build command from scratch; config.args is intentionally bypassed
-        # because --tools "" would prevent file reading from the vault.
-        cmd = [
-            config.command, "--code", "-p",
-            "--add-dir", config.kb_vault_path,
-            "--no-session-persistence",
-            prompt,
-        ]
+        # 后台异步增量更新索引（不等结果）
+        threading.Thread(
+            target=update_index,
+            args=(config.kb_vault_path,),
+            daemon=True,
+        ).start()
+        # 同步 FTS5 粗筛
+        query = _extract_query(messages)
+        search_results = search(query, config.kb_vault_path)
+        if not search_results:
+            use_add_dir = True  # 检索为空，降级
+
+    prompt = build_reply_prompt(
+        messages,
+        max_messages=config.max_messages,
+        kb_enabled=config.kb_enabled,
+        search_results=search_results if search_results else None,
+    )
+
+    if config.kb_enabled:
+        if use_add_dir:
+            cmd = [
+                config.command, "--code", "-p",
+                "--add-dir", config.kb_vault_path,
+                "--no-session-persistence",
+                prompt,
+            ]
+        else:
+            cmd = [
+                config.command, "--code", "-p",
+                "--no-session-persistence",
+            ]
+            for r in search_results:
+                cmd += ["--add-file", r.path]
+            cmd.append(prompt)
     else:
         cmd = [config.command, *config.args, prompt]
     try:
