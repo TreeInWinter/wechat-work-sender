@@ -1310,23 +1310,13 @@ class WXSenderApp:
                 win.destroy()
                 self.root.attributes("-topmost", True)
 
-        def on_rebuild():
-            """手动重建索引按钮回调。"""
-            cur_path = path_var.get().strip()
-            if not cur_path:
-                self._show_warning("请先选择 Obsidian Vault 路径")
-                return
-            if not _kb_rebuild:
-                return
-            # 先保存当前设置再重建
-            self._app_config["kb_enabled"] = kb_var.get()
-            self._app_config["kb_vault_path"] = cur_path
-            try:
-                save_config(self._app_config)
-            except OSError:
-                pass
-            self._app_config = load_config()
-            _start_rebuild_ui(cur_path)
+        # 状态标签（重建进度反馈，默认隐藏）
+        status_lbl = ctk.CTkLabel(
+            body, text="", height=18,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            text_color="#888",
+        )
+        status_lbl.pack(fill="x", padx=16, pady=(0, 4))
 
         def on_cancel():
             win.destroy()
@@ -1334,28 +1324,82 @@ class WXSenderApp:
 
         win.protocol("WM_DELETE_WINDOW", on_cancel)
 
-        ctk.CTkButton(
+        # 先建按钮，存引用；回调用 configure(command=) 补绑，避免前向引用
+        btn_rebuild = ctk.CTkButton(
             footer, text="重建索引", height=32, corner_radius=8,
             fg_color="transparent", border_width=1, border_color="#d9d9d9",
             text_color="#555", hover_color="#f0f0f0",
             font=ctk.CTkFont(family="PingFang SC", size=12),
-            command=on_rebuild,
-        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        )
+        btn_rebuild.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
-        ctk.CTkButton(
+        btn_cancel = ctk.CTkButton(
             footer, text="取消", height=32, corner_radius=8,
             fg_color="transparent", border_width=1, border_color="#d9d9d9",
             text_color="#666", hover_color="#f0f0f0",
             font=ctk.CTkFont(family="PingFang SC", size=12),
             command=on_cancel,
-        ).grid(row=0, column=1, padx=(4, 4), sticky="ew")
+        )
+        btn_cancel.grid(row=0, column=1, padx=(4, 4), sticky="ew")
 
-        ctk.CTkButton(
+        btn_save = ctk.CTkButton(
             footer, text="保存", height=32, corner_radius=8,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=on_save,
-        ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
+        )
+        btn_save.grid(row=0, column=2, padx=(4, 0), sticky="ew")
+
+        def on_rebuild():
+            """手动重建索引：保持窗口打开，原地显示进度。"""
+            cur_path = path_var.get().strip()
+            if not cur_path:
+                self._show_warning("请先选择 Obsidian Vault 路径")
+                return
+            if not _kb_rebuild:
+                return
+            # 先保存当前设置
+            self._app_config["kb_enabled"] = kb_var.get()
+            self._app_config["kb_vault_path"] = cur_path
+            try:
+                save_config(self._app_config)
+            except OSError:
+                pass
+            self._app_config = load_config()
+
+            # 禁用所有按钮，显示进度
+            for btn in (btn_rebuild, btn_cancel, btn_save):
+                btn.configure(state="disabled")
+            btn_rebuild.configure(text="重建中…")
+            status_lbl.configure(text="正在建立知识库索引…", text_color="#888")
+
+            def do_inline_rebuild():
+                count = 0
+                err = None
+                try:
+                    count = _kb_rebuild(cur_path)
+                except Exception as e:
+                    err = str(e)
+
+                def on_done():
+                    for btn in (btn_rebuild, btn_cancel, btn_save):
+                        btn.configure(state="normal")
+                    btn_rebuild.configure(text="重建索引")
+                    if err:
+                        status_lbl.configure(
+                            text=f"❌ 重建失败：{err[:40]}", text_color="#cf1322"
+                        )
+                    else:
+                        status_lbl.configure(
+                            text=f"✅ 完成，已索引 {count} 个文件", text_color="#389e0d"
+                        )
+                    self._update_kb_row()
+
+                self.root.after(0, on_done)
+
+            threading.Thread(target=do_inline_rebuild, daemon=True).start()
+
+        btn_rebuild.configure(command=on_rebuild)
 
     # ── 生成中动效 ───────────────────────────────────────────
 
