@@ -1,3 +1,4 @@
+import os
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -100,8 +101,10 @@ class BuildReplyPromptKBTests(unittest.TestCase):
 
 
 class GenerateReplyKBTests(unittest.TestCase):
+    @patch("ai_reply.update_index")
+    @patch("ai_reply.search", return_value=[])   # 空结果 → 降级 --add-dir
     @patch("ai_reply.subprocess.run")
-    def test_kb_enabled_uses_add_dir_and_no_tools_flag(self, run_mock):
+    def test_kb_enabled_uses_add_dir_and_no_tools_flag(self, run_mock, _mock_search, _mock_update):
         run_mock.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="回复内容", stderr=""
         )
@@ -221,3 +224,90 @@ class ExtractKBEntryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from unittest.mock import MagicMock
+from pathlib import Path
+from kb_search import SearchResult
+
+
+def test_build_reply_prompt_includes_candidate_docs_when_search_results_provided():
+    msgs = [{"sender": "对方", "content": "我的订单到哪了", "time": "10:00"}]
+    results = [
+        SearchResult(
+            path="/vault/订单查询.md",
+            title="订单查询",
+            scenario="用户询问订单进度",
+            tags=["订单", "客服"],
+            snippet="您好我帮您查...",
+            score=1.5,
+        )
+    ]
+    prompt = build_reply_prompt(msgs, search_results=results)
+    assert "候选文档" in prompt
+    assert "订单查询" in prompt
+    assert "用户询问订单进度" in prompt
+
+
+def test_build_reply_prompt_no_candidate_section_when_no_results():
+    msgs = [{"sender": "对方", "content": "你好", "time": "10:00"}]
+    prompt = build_reply_prompt(msgs, search_results=[])
+    assert "候选文档" not in prompt
+
+
+def test_build_reply_prompt_no_candidate_section_when_results_is_none():
+    msgs = [{"sender": "对方", "content": "你好", "time": "10:00"}]
+    prompt = build_reply_prompt(msgs, search_results=None)
+    assert "候选文档" not in prompt
+
+
+def _make_msgs():
+    return [{"sender": "对方", "content": "订单到了吗", "time": "10:00"}]
+
+
+def test_generate_reply_uses_add_file_when_search_results_found(tmp_path):
+    """当 FTS5 检索到结果时，命令应包含 --add-file 而非 --add-dir。"""
+    vault = str(tmp_path / "vault")
+    os.makedirs(vault)
+    md_file = os.path.join(vault, "订单.md")
+    Path(md_file).write_text("---\ntitle: 订单\n---\n内容", encoding="utf-8")
+
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "好的，帮您查一下"
+
+    with patch("ai_reply.search") as mock_search, \
+         patch("ai_reply.update_index"), \
+         patch("ai_reply.subprocess.run", return_value=fake_result) as mock_run:
+
+        mock_search.return_value = [
+            SearchResult(path=md_file, title="订单查询", scenario="测试", tags=[], snippet="", score=1.0)
+        ]
+        config = AIReplyConfig(kb_enabled=True, kb_vault_path=vault)
+        reply = generate_reply(_make_msgs(), config)
+
+    cmd = mock_run.call_args[0][0]
+    assert "--add-file" in cmd
+    assert "--add-dir" not in cmd
+    assert reply == "好的，帮您查一下"
+
+
+def test_generate_reply_fallback_to_add_dir_when_search_empty(tmp_path):
+    """FTS5 返回空时，命令应降级为 --add-dir。"""
+    vault = str(tmp_path / "vault")
+    os.makedirs(vault)
+
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "收到，稍后处理"
+
+    with patch("ai_reply.search", return_value=[]), \
+         patch("ai_reply.update_index"), \
+         patch("ai_reply.subprocess.run", return_value=fake_result) as mock_run:
+
+        config = AIReplyConfig(kb_enabled=True, kb_vault_path=vault)
+        generate_reply(_make_msgs(), config)
+
+    cmd = mock_run.call_args[0][0]
+    assert "--add-dir" in cmd
+    assert "--add-file" not in cmd

@@ -8,6 +8,15 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+
+try:
+    from kb_search import search, update_index
+except ImportError:
+    def search(*args, **kwargs):  # type: ignore[misc]
+        return []
+    def update_index(*args, **kwargs):  # type: ignore[misc]
+        return 0, 0
 
 
 class AIReplyError(Exception):
@@ -52,6 +61,13 @@ class AIReplyConfig:
     kb_vault_path: str = ""
 
 
+def _extract_query(messages: list[dict], n: int = 3) -> str:
+    """取最后 n 条非空消息的内容拼成查询串。"""
+    useful = [m for m in messages if str(m.get("content", "")).strip()]
+    selected = useful[-n:]
+    return " ".join(str(m.get("content", "")).strip() for m in selected)
+
+
 def _format_message(message: dict) -> str:
     """格式化单条消息，包含发送者，便于 AI 区分对话双方。"""
     sender = str(message.get("sender", "")).strip() or "对方"
@@ -63,18 +79,41 @@ def _format_message(message: dict) -> str:
 
 
 def build_reply_prompt(
-    messages: list[dict], max_messages: int = 20, kb_enabled: bool = False
+    messages: list[dict],
+    max_messages: int = 20,
+    kb_enabled: bool = False,
+    search_results=None,   # list[SearchResult] | None
 ) -> str:
     useful = [m for m in messages if str(m.get("content", "")).strip()]
     selected = useful[-max_messages:]
     transcript = "\n".join(_format_message(m) for m in selected)
+
+    # 候选文档段落（两级检索时注入）
+    candidate_section = ""
+    if search_results:
+        lines = [
+            "以下是从知识库中预检索到的候选文档（按相关度排序），"
+            "请从中选择 3~5 个你认为最相关的文件精读后再生成回复。"
+            "如果这些文档都不相关，可以不参考。\n\n【候选文档】"
+        ]
+        for i, r in enumerate(search_results, 1):
+            tags_str = " ".join(r.tags) if r.tags else ""
+            lines.append(
+                f"{i}. {r.title}\n"
+                f"   场景：{r.scenario}\n"
+                f"   标签：{tags_str}\n"
+                f"   摘要：{r.snippet}"
+            )
+        candidate_section = "\n".join(lines) + "\n\n"
+
     kb_preamble = (
         "你可以访问本地知识库目录中的文档。请先根据聊天内容在知识库中检索相关文档，"
         "结合检索结果和聊天上下文，生成一段可以直接发送的中文回复。\n\n"
-        if kb_enabled
+        if kb_enabled and not search_results
         else ""
     )
     return (
+        f"{candidate_section}"
         f"{kb_preamble}"
         "你是 IM 聊天回复助手。请根据下面最近的聊天记录，生成一段可以直接发送的中文回复。\n\n"
         "要求：\n"
@@ -170,18 +209,51 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
                 f"知识库路径不存在或不是目录：{config.kb_vault_path}"
             )
 
-    prompt = build_reply_prompt(
-        messages, max_messages=config.max_messages, kb_enabled=config.kb_enabled
-    )
+    # ── 两级检索 ──
+    search_results = []
+    use_add_dir = False
+
     if config.kb_enabled:
-        # KB mode: build command from scratch; config.args is intentionally bypassed
-        # because --tools "" would prevent file reading from the vault.
-        cmd = [
-            config.command, "--code", "-p",
-            "--add-dir", config.kb_vault_path,
-            "--no-session-persistence",
-            prompt,
-        ]
+        # 后台异步增量更新索引（不等结果）
+        def _bg_update(path: str) -> None:
+            try:
+                update_index(path)
+            except Exception:
+                pass  # vault 被删除或 db 锁定时静默忽略，下次调用重试
+
+        threading.Thread(target=_bg_update, args=(config.kb_vault_path,), daemon=True).start()
+        # 同步 FTS5 粗筛；任何意外异常均降级为 --add-dir
+        query = _extract_query(messages)
+        try:
+            search_results = search(query, config.kb_vault_path)
+        except Exception:
+            search_results = []
+        if not search_results:
+            use_add_dir = True  # 检索为空或出错，降级
+
+    prompt = build_reply_prompt(
+        messages,
+        max_messages=config.max_messages,
+        kb_enabled=config.kb_enabled,
+        search_results=search_results if search_results else None,
+    )
+
+    if config.kb_enabled:
+        if use_add_dir:
+            cmd = [
+                config.command, "--code", "-p",
+                "--add-dir", config.kb_vault_path,
+                "--no-session-persistence",
+                prompt,
+            ]
+        else:
+            cmd = [
+                config.command, "--code", "-p",
+                "--no-session-persistence",
+            ]
+            for r in search_results:
+                cmd += ["--add-file", r.path]
+            cmd.append(prompt)
     else:
         cmd = [config.command, *config.args, prompt]
     try:
@@ -203,7 +275,8 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
 
     reply = (result.stdout or "").strip()
     if not reply:
-        visible_cmd = " ".join([config.command, *config.args])
+        # 用实际构建的 cmd 前几段（排除 prompt 内容）给出有意义的调试提示
+        visible_cmd = " ".join(cmd[:6])
         raise AIEmptyResponseError(
             f"AI 命令没有输出，请在终端确认可用：{visible_cmd} \"只输出两个字：可以\""
         )

@@ -47,6 +47,35 @@ from ai_reply import (
 from kb_writer import KBEntry, save_to_vault
 from config import load_config, save_config
 
+try:
+    from kb_search import rebuild_index as _kb_rebuild, get_db_path as _kb_get_db_path
+    import sqlite3 as _sqlite3
+except ImportError:
+    _kb_rebuild = None
+    _kb_get_db_path = None
+    _sqlite3 = None
+
+
+def _vault_is_indexed(vault_path: str) -> bool:
+    """返回 True 当且仅当索引中已有属于 vault_path 的记录。"""
+    if not _kb_get_db_path or not _sqlite3:
+        return False
+    try:
+        db = _kb_get_db_path()
+        if not os.path.exists(db):
+            return False
+        conn = _sqlite3.connect(db)
+        try:
+            n = conn.execute(
+                "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
+                (vault_path.rstrip("/") + "/%",),
+            ).fetchone()[0]
+            return n > 0
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
 # 颜色常量
 PRIMARY   = "#1677FF"
 PRIMARY_H = "#0958d9"   # hover
@@ -1125,9 +1154,26 @@ class WXSenderApp:
         cfg = self._app_config
         if cfg.get("kb_enabled") and cfg.get("kb_vault_path"):
             vault_name = os.path.basename(cfg["kb_vault_path"]) or cfg["kb_vault_path"]
+            count_str = ""
+            if _kb_get_db_path and _sqlite3:
+                try:
+                    db = _kb_get_db_path()
+                    if os.path.exists(db):
+                        conn = _sqlite3.connect(db)
+                        try:
+                            vault = cfg["kb_vault_path"].rstrip("/")
+                            n = conn.execute(
+                                "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
+                                (vault + "/%",),
+                            ).fetchone()[0]
+                            count_str = f"  ({n} 条)"
+                        finally:
+                            conn.close()
+                except Exception:
+                    pass
             self.kb_row.configure(fg_color="#f6ffed", border_color="#b7eb8f")
             self.kb_row_label.configure(
-                text=f"📗 知识库已启用 · {vault_name}", text_color="#389e0d"
+                text=f"📗 知识库已启用 · {vault_name}{count_str}", text_color="#389e0d"
             )
         else:
             self.kb_row.configure(fg_color="#fafafa", border_color="#e8e8e8")
@@ -1139,9 +1185,10 @@ class WXSenderApp:
         """弹出 AI 知识库设置窗口。"""
         self.root.attributes("-topmost", False)
         win = ctk.CTkToplevel(self.root)
+        win.withdraw()   # 先隐藏，定位后再显示，防止闪烁
         win.title("AI 知识库设置")
-        win.geometry("400x210")
         win.resizable(False, False)
+        self._center_on_root(win, 400, 230)   # 内部调用 deiconify()
         win.lift()
         win.focus_force()
         win.grab_set()
@@ -1213,14 +1260,58 @@ class WXSenderApp:
         # ── Footer ──
         footer = ctk.CTkFrame(body, fg_color="transparent")
         footer.pack(fill="x", padx=16, pady=(4, 14))
-        footer.grid_columnconfigure((0, 1), weight=1)
+        footer.grid_columnconfigure((0, 1, 2), weight=1)
+
+        def _start_rebuild_ui(target_path: str) -> None:
+            """关闭设置窗口，弹出进度提示，后台重建索引。"""
+            win.destroy()
+            self.root.attributes("-topmost", False)
+            progress_win = ctk.CTkToplevel(self.root)
+            progress_win.withdraw()
+            progress_win.title("建立索引")
+            progress_win.resizable(False, False)
+            self._center_on_root(progress_win, 320, 80)
+            progress_win.attributes("-topmost", True)
+            progress_win.grab_set()
+            prog_lbl = ctk.CTkLabel(progress_win, text="正在建立知识库索引…")
+            prog_lbl.pack(expand=True)
+
+            def do_rebuild():
+                err = None
+                try:
+                    _kb_rebuild(target_path)
+                except Exception as e:
+                    err = str(e)
+
+                def on_done():
+                    self._update_kb_row()
+                    if err:
+                        prog_lbl.configure(
+                            text=f"❌ 重建失败：{err[:50]}", text_color="#cf1322"
+                        )
+                        # 3s 后自动关闭
+                        self.root.after(3000, lambda: (
+                            progress_win.destroy(),
+                            self.root.attributes("-topmost", True),
+                        ))
+                    else:
+                        progress_win.destroy()
+                        self.root.attributes("-topmost", True)
+
+                self.root.after(0, on_done)
+
+            threading.Thread(target=do_rebuild, daemon=True).start()
 
         def on_save():
             if kb_var.get() and not path_var.get():
                 self._show_warning("请先选择 Obsidian Vault 路径")
                 return
-            self._app_config["kb_enabled"] = kb_var.get()
-            self._app_config["kb_vault_path"] = path_var.get()
+            new_enabled = kb_var.get()
+            new_path = path_var.get().strip()
+            old_path = self._app_config.get("kb_vault_path", "")
+
+            self._app_config["kb_enabled"] = new_enabled
+            self._app_config["kb_vault_path"] = new_path
             try:
                 save_config(self._app_config)
             except OSError as e:
@@ -1228,8 +1319,25 @@ class WXSenderApp:
                 return
             self._app_config = load_config()
             self._update_kb_row()
-            win.destroy()
-            self.root.attributes("-topmost", True)
+
+            # 路径变更 或 当前 vault 从未被索引时，重建索引
+            needs_rebuild = (
+                new_enabled and new_path and _kb_rebuild
+                and (new_path != old_path or not _vault_is_indexed(new_path))
+            )
+            if needs_rebuild:
+                _start_rebuild_ui(new_path)
+            else:
+                win.destroy()
+                self.root.attributes("-topmost", True)
+
+        # 状态标签（重建进度反馈，默认隐藏）
+        status_lbl = ctk.CTkLabel(
+            body, text="", height=18,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            text_color="#888",
+        )
+        status_lbl.pack(fill="x", padx=16, pady=(0, 4))
 
         def on_cancel():
             win.destroy()
@@ -1237,20 +1345,82 @@ class WXSenderApp:
 
         win.protocol("WM_DELETE_WINDOW", on_cancel)
 
-        ctk.CTkButton(
+        # 先建按钮，存引用；回调用 configure(command=) 补绑，避免前向引用
+        btn_rebuild = ctk.CTkButton(
+            footer, text="重建索引", height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#555", hover_color="#f0f0f0",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+        )
+        btn_rebuild.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+
+        btn_cancel = ctk.CTkButton(
             footer, text="取消", height=32, corner_radius=8,
             fg_color="transparent", border_width=1, border_color="#d9d9d9",
             text_color="#666", hover_color="#f0f0f0",
             font=ctk.CTkFont(family="PingFang SC", size=12),
             command=on_cancel,
-        ).grid(row=0, column=0, padx=(0, 5), sticky="ew")
+        )
+        btn_cancel.grid(row=0, column=1, padx=(4, 4), sticky="ew")
 
-        ctk.CTkButton(
+        btn_save = ctk.CTkButton(
             footer, text="保存", height=32, corner_radius=8,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=on_save,
-        ).grid(row=0, column=1, padx=(5, 0), sticky="ew")
+        )
+        btn_save.grid(row=0, column=2, padx=(4, 0), sticky="ew")
+
+        def on_rebuild():
+            """手动重建索引：保持窗口打开，原地显示进度。"""
+            cur_path = path_var.get().strip()
+            if not cur_path:
+                self._show_warning("请先选择 Obsidian Vault 路径")
+                return
+            if not _kb_rebuild:
+                return
+            # 先保存当前设置
+            self._app_config["kb_enabled"] = kb_var.get()
+            self._app_config["kb_vault_path"] = cur_path
+            try:
+                save_config(self._app_config)
+            except OSError:
+                pass
+            self._app_config = load_config()
+
+            # 禁用所有按钮，显示进度
+            for btn in (btn_rebuild, btn_cancel, btn_save):
+                btn.configure(state="disabled")
+            btn_rebuild.configure(text="重建中…")
+            status_lbl.configure(text="正在建立知识库索引…", text_color="#888")
+
+            def do_inline_rebuild():
+                count = 0
+                err = None
+                try:
+                    count = _kb_rebuild(cur_path)
+                except Exception as e:
+                    err = str(e)
+
+                def on_done():
+                    for btn in (btn_rebuild, btn_cancel, btn_save):
+                        btn.configure(state="normal")
+                    btn_rebuild.configure(text="重建索引")
+                    if err:
+                        status_lbl.configure(
+                            text=f"❌ 重建失败：{err[:40]}", text_color="#cf1322"
+                        )
+                    else:
+                        status_lbl.configure(
+                            text=f"✅ 完成，已索引 {count} 个文件", text_color="#389e0d"
+                        )
+                    self._update_kb_row()
+
+                self.root.after(0, on_done)
+
+            threading.Thread(target=do_inline_rebuild, daemon=True).start()
+
+        btn_rebuild.configure(command=on_rebuild)
 
     # ── 生成中动效 ───────────────────────────────────────────
 
@@ -1906,6 +2076,19 @@ class WXSenderApp:
     # 会被 CTk 窗口遮挡。修复方式：
     #   - 文本输入 → ctk.CTkInputDialog（CTk 层级，可见）
     #   - 警告/确认 → 弹出前临时关闭 topmost，结束后恢复
+
+    def _center_on_root(self, win: ctk.CTkToplevel, w: int, h: int) -> None:
+        """将 Toplevel 窗口居中叠放在主窗口上，防止先在默认位置闪烁。
+        调用方须在 CTkToplevel() 创建后立即调用 win.withdraw()，
+        本方法定位完成后调用 win.deiconify() 一次性显示在正确位置。
+        """
+        self.root.update_idletasks()
+        rx, ry = self.root.winfo_x(), self.root.winfo_y()
+        rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        x = rx + (rw - w) // 2
+        y = ry + (rh - h) // 2
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        win.deiconify()
 
     def _ask_input(self, title: str, prompt: str) -> str | None:
         """弹出文本输入框，临时关闭 topmost 确保对话框可见且可输入"""

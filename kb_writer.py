@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime
+
+try:
+    from kb_search import update_index
+except ImportError:
+    def update_index(*args, **kwargs):  # type: ignore[misc]
+        pass
 
 
 @dataclass
@@ -62,5 +69,14 @@ def save_to_vault(entry: KBEntry, vault_path: str) -> str:
 
     with open(dest, "w", encoding="utf-8") as f:
         f.write(content)
+
+    # 异步增量更新索引，确保刚写入的文件下次可被检索
+    def _bg_update(path: str) -> None:
+        try:
+            update_index(path)
+        except Exception:
+            pass  # vault 被删除或 db 锁定时静默忽略
+
+    threading.Thread(target=_bg_update, args=(vault_path,), daemon=True).start()
 
     return os.path.abspath(dest)

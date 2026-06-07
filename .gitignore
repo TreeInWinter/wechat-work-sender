@@ -7,3 +7,4 @@ build/
 dist/
 .superpowers/
 config.json
+.worktrees/

@@ -219,6 +219,13 @@ docs/
    - GUI 顶部“接管对象”下拉决定状态检测、窗口吸附、读取聊天和发送路由。
    - 不同 IM 的 AX 树、进程名、bundle id 必须留在各自适配器文件中，不要写回 `gui_panel.py`。
 
+11. **当前工作区观测（2026-06-06）**：本次会话仅熟悉项目并跑测试，无业务代码修改。
+   - 当前本地分支为 `master`，`git status` 显示落后 `origin/master` 28 个提交；HEAD 同时指向 `origin/feature/multi-im-adapters`。
+   - 当前 `origin` 实际为 `git@github.com:TreeInWinter/wechat-work-sender.git`，与上方历史记录中的美团内部远端信息不一致，后续推送前需先确认目标远端。
+   - 未跟踪文件 `config.json` 视为本地配置/用户数据，本次未读取、未修改。
+   - 现有测试命令 `.venv/bin/python -m pytest -q` 通过，结果为 `64 passed`。
+   - 代码现状中 `WechatWorkAdapter.send_blocks()` 对含图片 blocks 会走 `sender.send_blocks_single()`（合成单张图片/单条消息路径），与第 6 条“图文混排用 send_message + send_image 串联”的历史决策存在漂移；涉及企业微信图文发送前需优先核对真实期望。
+
 ---
 
 ## 常用命令
