@@ -73,3 +73,23 @@ class SaveToVaultTests(unittest.TestCase):
         filename = os.path.basename(path)
         self.assertNotIn("/", filename)
         self.assertNotIn(":", filename)
+
+
+from unittest.mock import patch
+
+
+def test_save_to_vault_triggers_update_index_in_background(tmp_path):
+    """存入后应异步触发 update_index，不阻塞主线程。"""
+    entry = KBEntry(
+        title="测试",
+        scenario="测试场景",
+        tags=["测试"],
+        reply="好的",
+        source="企业微信",
+        date="2026-06-07",
+    )
+    with patch("kb_writer.update_index") as mock_update:
+        save_to_vault(entry, str(tmp_path))
+        # 给后台线程一点时间运行
+        import time; time.sleep(0.15)
+        mock_update.assert_called_once_with(str(tmp_path))
