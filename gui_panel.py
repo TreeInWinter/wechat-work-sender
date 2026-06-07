@@ -47,6 +47,14 @@ from ai_reply import (
 from kb_writer import KBEntry, save_to_vault
 from config import load_config, save_config
 
+try:
+    from kb_search import rebuild_index as _kb_rebuild, get_db_path as _kb_get_db_path
+    import sqlite3 as _sqlite3
+except ImportError:
+    _kb_rebuild = None
+    _kb_get_db_path = None
+    _sqlite3 = None
+
 # 颜色常量
 PRIMARY   = "#1677FF"
 PRIMARY_H = "#0958d9"   # hover
@@ -1125,9 +1133,20 @@ class WXSenderApp:
         cfg = self._app_config
         if cfg.get("kb_enabled") and cfg.get("kb_vault_path"):
             vault_name = os.path.basename(cfg["kb_vault_path"]) or cfg["kb_vault_path"]
+            count_str = ""
+            if _kb_get_db_path and _sqlite3:
+                try:
+                    db = _kb_get_db_path()
+                    if os.path.exists(db):
+                        conn = _sqlite3.connect(db)
+                        n = conn.execute("SELECT COUNT(*) FROM kb_meta").fetchone()[0]
+                        conn.close()
+                        count_str = f"  ({n} 条)"
+                except Exception:
+                    pass
             self.kb_row.configure(fg_color="#f6ffed", border_color="#b7eb8f")
             self.kb_row_label.configure(
-                text=f"📗 知识库已启用 · {vault_name}", text_color="#389e0d"
+                text=f"📗 知识库已启用 · {vault_name}{count_str}", text_color="#389e0d"
             )
         else:
             self.kb_row.configure(fg_color="#fafafa", border_color="#e8e8e8")
@@ -1219,8 +1238,12 @@ class WXSenderApp:
             if kb_var.get() and not path_var.get():
                 self._show_warning("请先选择 Obsidian Vault 路径")
                 return
-            self._app_config["kb_enabled"] = kb_var.get()
-            self._app_config["kb_vault_path"] = path_var.get()
+            new_enabled = kb_var.get()
+            new_path = path_var.get().strip()
+            old_path = self._app_config.get("kb_vault_path", "")
+
+            self._app_config["kb_enabled"] = new_enabled
+            self._app_config["kb_vault_path"] = new_path
             try:
                 save_config(self._app_config)
             except OSError as e:
@@ -1228,8 +1251,34 @@ class WXSenderApp:
                 return
             self._app_config = load_config()
             self._update_kb_row()
-            win.destroy()
-            self.root.attributes("-topmost", True)
+
+            # 路径变更或首次启用时，重建索引
+            if new_enabled and new_path and new_path != old_path and _kb_rebuild:
+                win.destroy()
+                self.root.attributes("-topmost", False)
+                progress_win = ctk.CTkToplevel(self.root)
+                progress_win.title("建立索引")
+                progress_win.geometry("300x80")
+                progress_win.resizable(False, False)
+                progress_win.attributes("-topmost", True)
+                lbl = ctk.CTkLabel(progress_win, text="正在建立知识库索引…")
+                lbl.pack(expand=True)
+
+                def do_rebuild():
+                    try:
+                        _kb_rebuild(new_path)
+                    except Exception:
+                        pass
+                    self.root.after(0, lambda: (
+                        progress_win.destroy(),
+                        self.root.attributes("-topmost", True),
+                        self._update_kb_row(),
+                    ))
+
+                threading.Thread(target=do_rebuild, daemon=True).start()
+            else:
+                win.destroy()
+                self.root.attributes("-topmost", True)
 
         def on_cancel():
             win.destroy()
