@@ -221,3 +221,36 @@ class ExtractKBEntryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from kb_search import SearchResult
+
+
+def test_build_reply_prompt_includes_candidate_docs_when_search_results_provided():
+    msgs = [{"sender": "对方", "content": "我的订单到哪了", "time": "10:00"}]
+    results = [
+        SearchResult(
+            path="/vault/订单查询.md",
+            title="订单查询",
+            scenario="用户询问订单进度",
+            tags=["订单", "客服"],
+            snippet="您好我帮您查...",
+            score=1.5,
+        )
+    ]
+    prompt = build_reply_prompt(msgs, search_results=results)
+    assert "候选文档" in prompt
+    assert "订单查询" in prompt
+    assert "用户询问订单进度" in prompt
+
+
+def test_build_reply_prompt_no_candidate_section_when_no_results():
+    msgs = [{"sender": "对方", "content": "你好", "time": "10:00"}]
+    prompt = build_reply_prompt(msgs, search_results=[])
+    assert "候选文档" not in prompt
+
+
+def test_build_reply_prompt_no_candidate_section_when_results_is_none():
+    msgs = [{"sender": "对方", "content": "你好", "time": "10:00"}]
+    prompt = build_reply_prompt(msgs, search_results=None)
+    assert "候选文档" not in prompt
