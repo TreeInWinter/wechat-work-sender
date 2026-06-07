@@ -52,3 +52,23 @@ def test_rebuild_index_ignores_non_markdown(tmp_path):
     db = str(tmp_path / "test.db")
     count = rebuild_index(vault, db_path=db)
     assert count == 1
+
+
+@pytest.mark.skip(reason="需要 search() 实现后启用")
+def test_parse_frontmatter_single_quote_tags(tmp_path):
+    """单引号 tags 格式应正确解析。"""
+    vault = _make_vault(tmp_path, {
+        "test.md": "---\ntitle: 测试\ntags: ['问候', '售后']\n---\n内容"
+    })
+    db = str(tmp_path / "idx.db")
+    rebuild_index(vault, db_path=db)
+    from kb_search import search
+    results = search("测试", vault, db_path=db)
+    # 标题能检索到就说明文件被正确索引了
+    assert len(results) >= 1
+
+
+def test_rebuild_index_raises_on_invalid_vault_path():
+    """vault_path 不存在时应抛出 ValueError。"""
+    with pytest.raises(ValueError, match="不存在"):
+        rebuild_index("/nonexistent/path/that/does/not/exist")

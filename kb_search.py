@@ -71,7 +71,10 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
             v = v.strip().strip('"')
             # tags: ["a", "b"]  →  list
             if v.startswith("["):
-                items = re.findall(r'"([^"]+)"', v)
+                # 支持双引号、单引号、裸值三种格式
+                items = re.findall(r'["\']([^"\']+)["\']', v)
+                if not items:  # 裸值如 [a, b, c]
+                    items = [x.strip() for x in v.strip("[]").split(",") if x.strip()]
                 meta[k] = items
             else:
                 meta[k] = v
@@ -106,6 +109,8 @@ def _index_file(conn: sqlite3.Connection, path: str) -> None:
 
 def rebuild_index(vault_path: str, db_path: str | None = None) -> int:
     """全量重建索引。返回已索引文件数。"""
+    if not os.path.isdir(vault_path):
+        raise ValueError(f"vault_path 不存在或不是目录: {vault_path}")
     db_path = db_path or get_db_path()
     conn = _open_db(db_path)
     try:
