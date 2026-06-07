@@ -176,3 +176,60 @@ def update_index(vault_path: str, db_path: str | None = None) -> tuple[int, int]
         return added, deleted
     finally:
         conn.close()
+
+
+def search(
+    query: str,
+    vault_path: str,
+    top_k: int = 15,
+    db_path: str | None = None,
+) -> list[SearchResult]:
+    """FTS5 检索，返回 Top-K 结果。db 不存在或出错时返回空列表。"""
+    db_path = db_path or get_db_path()
+    if not os.path.exists(db_path):
+        return []
+
+    # FTS5 查询需要转义特殊字符，简单处理：去掉引号
+    safe_query = query.replace('"', " ").strip()
+    if not safe_query:
+        return []
+
+    try:
+        conn = _open_db(db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                    path,
+                    title,
+                    scenario,
+                    tags,
+                    snippet(kb_fts, 4, '[', ']', '...', 10) AS snip,
+                    -rank AS score
+                FROM kb_fts
+                WHERE kb_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (safe_query, top_k),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        # 查询语法错误（如特殊符号）→ 降级为空
+        return []
+    except Exception:
+        return []
+
+    results = []
+    for path, title, scenario, tags_str, snip, score in rows:
+        tags = [t.strip() for t in tags_str.split() if t.strip()] if tags_str else []
+        results.append(SearchResult(
+            path=path,
+            title=title or Path(path).stem,
+            scenario=scenario or "",
+            tags=tags,
+            snippet=snip or "",
+            score=float(score),
+        ))
+    return results

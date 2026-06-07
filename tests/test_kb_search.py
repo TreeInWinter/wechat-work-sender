@@ -54,7 +54,6 @@ def test_rebuild_index_ignores_non_markdown(tmp_path):
     assert count == 1
 
 
-@pytest.mark.skip(reason="需要 search() 实现后启用")
 def test_parse_frontmatter_single_quote_tags(tmp_path):
     """单引号 tags 格式应正确解析。"""
     vault = _make_vault(tmp_path, {
@@ -122,3 +121,46 @@ def test_update_index_updates_modified_file(tmp_path):
     added, deleted = update_index(str(tmp_path / "vault"), db_path=db)
     assert added == 1   # modified 计入 added
     assert deleted == 0
+
+
+from kb_search import search
+
+
+def test_search_returns_results_by_title(tmp_path):
+    vault = _make_vault(tmp_path, {
+        "订单查询.md": "---\ntitle: 订单查询\nscenario: 用户询问订单\ntags: [\"订单\",\"客服\"]\n---\n您好我帮您查一下",
+        "退款流程.md": "---\ntitle: 退款流程\nscenario: 用户申请退款\ntags: [\"退款\"]\n---\n退款3-5工作日",
+    })
+    db = str(tmp_path / "idx.db")
+    rebuild_index(vault, db_path=db)
+
+    results = search("订单", vault, db_path=db)
+    assert len(results) >= 1
+    assert any("订单" in r.title for r in results)
+
+
+def test_search_returns_results_by_tags(tmp_path):
+    vault = _make_vault(tmp_path, {
+        "物流延误.md": "---\ntitle: 物流延误\nscenario: 货物未到\ntags: [\"物流\",\"延误\"]\n---\n非常抱歉",
+    })
+    db = str(tmp_path / "idx.db")
+    rebuild_index(vault, db_path=db)
+
+    results = search("物流", vault, db_path=db)
+    assert len(results) >= 1
+    assert results[0].path.endswith("物流延误.md")
+
+
+def test_search_returns_empty_list_when_db_missing(tmp_path):
+    results = search("任意查询", str(tmp_path / "vault"), db_path=str(tmp_path / "no.db"))
+    assert results == []
+
+
+def test_search_top_k_limits_results(tmp_path):
+    files = {f"doc{i}.md": f"---\ntitle: 文档{i}\nscenario: 场景\ntags: []\n---\n内容{i}" for i in range(20)}
+    vault = _make_vault(tmp_path, files)
+    db = str(tmp_path / "idx.db")
+    rebuild_index(vault, db_path=db)
+
+    results = search("文档", vault, top_k=5, db_path=db)
+    assert len(results) <= 5
