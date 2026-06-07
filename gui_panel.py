@@ -1182,8 +1182,8 @@ class WXSenderApp:
         self.root.attributes("-topmost", False)
         win = ctk.CTkToplevel(self.root)
         win.title("AI 知识库设置")
-        win.geometry("400x210")
         win.resizable(False, False)
+        self._center_on_root(win, 400, 230)
         win.lift()
         win.focus_force()
         win.grab_set()
@@ -1263,8 +1263,8 @@ class WXSenderApp:
             self.root.attributes("-topmost", False)
             progress_win = ctk.CTkToplevel(self.root)
             progress_win.title("建立索引")
-            progress_win.geometry("300x80")
             progress_win.resizable(False, False)
+            self._center_on_root(progress_win, 300, 80)
             progress_win.attributes("-topmost", True)
             ctk.CTkLabel(progress_win, text="正在建立知识库索引…").pack(expand=True)
 
@@ -2055,6 +2055,15 @@ class WXSenderApp:
     # 会被 CTk 窗口遮挡。修复方式：
     #   - 文本输入 → ctk.CTkInputDialog（CTk 层级，可见）
     #   - 警告/确认 → 弹出前临时关闭 topmost，结束后恢复
+
+    def _center_on_root(self, win: ctk.CTkToplevel, w: int, h: int) -> None:
+        """将 Toplevel 窗口居中叠放在主窗口上。"""
+        self.root.update_idletasks()
+        rx, ry = self.root.winfo_x(), self.root.winfo_y()
+        rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        x = rx + (rw - w) // 2
+        y = ry + (rh - h) // 2
+        win.geometry(f"{w}x{h}+{x}+{y}")
 
     def _ask_input(self, title: str, prompt: str) -> str | None:
         """弹出文本输入框，临时关闭 topmost 确保对话框可见且可输入"""
