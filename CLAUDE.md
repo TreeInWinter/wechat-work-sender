@@ -154,6 +154,24 @@ AI 回复第一版使用 `mc --code -p --tools "" --no-session-persistence` 作�
 
 ---
 
+### 10.1 云端知识库查询必须用 mc，不能用 claude CLI
+
+```python
+# 错误做法（hss_kb_client 旧版，GUI 独立运行时报 "Not logged in"）
+claude_cmd = ["~/.local/bin/claude", "--dangerously-skip-permissions", "--print", ...]
+
+# 正确做法（使用与普通 AI 回复相同的 mc 命令）
+cmd = [ai_command, "--code", "-p", "--tools", "", "--no-session-persistence", full_prompt]
+```
+
+**根本原因**：`claude` CLI 通过 `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_CUSTOM_HEADERS` 两个 env 变量认证，这两个变量**仅在 Claude Code 会话内由 harness 动态注入**。GUI 从普通终端或 `.app` 启动时，子进程环境中不存在这两个变量，`claude` 返回 `"Not logged in"`。
+
+`mc --code` 使用公司内部独立认证，与 Claude Code 会话无关，不受影响。
+
+`query_cloud()` 的 `ai_command`/`ai_args` 参数由 `generate_reply()` 传入 `config.command/args`，保证云端 KB 查询与普通 AI 回复使用同一命令入口。
+
+---
+
 ### 11. 微信（个人版）使用 Qt 渲染，AX 无法穿透，改用坐标点击
 
 ```python
@@ -267,6 +285,8 @@ docs/
 11. **大象 bundle ID**：实际为 `cn.neixin.pc`（非 `com.sankuai.daxiang`）。输入框在 depth=23，有占位符文本，需 `allow_with_value=True`。`kAXWindowsAttribute` 在未激活时返回空，activate 后才有窗口。**AppleScript 进程名 `"大象"` 已真机验证可用**（发送 verified=True）。
 
 12. **大象消息读取**：大象无 AXTable，消息在 AXStaticText depth=22（from window）。前 6 个节点是 UI 过滤器（未读/稍后/@我/单聊/群聊/图标），跳过。之后按序：时间戳 → 发送者名（2-4 汉字）→ 消息正文。depth=23 是侧边栏，不读取。已实现，真机验证通过。
+
+13. **云端知识库查询不能用 claude CLI，用 mc**：`claude CLI` 依赖 `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_CUSTOM_HEADERS`，这两个 env 变量仅在 Claude Code 会话内动态注入，GUI 独立启动时不存在，导致 `"Not logged in"`。`hss_kb_client.query_cloud()` 使用 `ai_command`/`ai_args` 参数（由调用方传入 `mc` 路径），不硬编码 claude。
 
 ---
 
