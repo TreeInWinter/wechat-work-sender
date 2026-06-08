@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.1.0] - 2026-06-08
+
+### Changed
+- 云端知识库问答从远程 CatPaw Agent（`hss-kb ask sync`，需服务端权限）改为本地执行：
+  用 `hss-kb query` 预取 Top 3 相关文档，再由 `claude --dangerously-skip-permissions`
+  本地推理生成答案，端到端约 24 秒，无需任何服务端权限
+- `ai_reply.generate_reply()` 在 cloud 模式下直接返回 `query_cloud` 的答案，
+  不再二次调用 mc，减少一次 LLM 调用延迟
+
+### Added
+- `hss_kb_client`: 新增 `_resolve_kb_root`（自动读取 kb-router.json 解析知识库路径）、
+  `_fetch_top_docs`（预读 Top N 文档内容注入 prompt）、`_claude_bin`（定位 claude CLI）
+
 ## [1.0.0.0] - 2026-06-07
 
 ### Added
