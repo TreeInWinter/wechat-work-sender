@@ -236,7 +236,7 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
     if effective_kb_mode == "none" and config.kb_enabled:
         effective_kb_mode = "local"
 
-    # ── 云端知识库分支（hss-kb-serve-entry） ──
+    # ── 云端知识库分支（hss-kb contract + mc，本地执行） ──
     if effective_kb_mode == "cloud":
         if _hss_kb_query is None:
             raise AICommandFailedError(
@@ -247,15 +247,14 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
                 "hss-kb CLI 未安装，请运行: npm install -g @saas/hss-kb-cli"
             )
         query = _extract_query(messages)
-        cloud_kb_timeout = max(30, min(config.timeout - 10, 110))
+        # query_cloud 内部已完成 contract + mc 全流程，直接返回最终回答
         try:
             result = _hss_kb_query(
                 query,
                 caller="wechat-work-sender",
                 scope=config.kb_scope,
-                timeout=cloud_kb_timeout,
+                timeout=config.timeout,
             )
-            cloud_kb_context = result.answer
         except HssKBUnavailableError as exc:
             raise AICommandFailedError(str(exc)) from exc
         except HssKBTimeoutError as exc:
@@ -263,12 +262,10 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
         except HssKBQueryError as exc:
             raise AICommandFailedError(str(exc)) from exc
 
-        prompt = build_reply_prompt(
-            messages,
-            max_messages=config.max_messages,
-            cloud_kb_context=cloud_kb_context,
-        )
-        cmd = [config.command, *config.args, prompt]
+        reply = result.answer
+        if not reply:
+            raise AIEmptyResponseError("云端知识库未返回有效回答")
+        return reply
 
     else:
         # ── 本地知识库 / 不使用知识库 ──

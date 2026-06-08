@@ -331,19 +331,19 @@ def test_build_reply_prompt_no_cloud_section_when_empty():
     assert "云端知识库参考" not in prompt
 
 
-def test_generate_reply_cloud_mode_injects_kb_answer():
-    """kb_mode='cloud' 时应调用 hss-kb 并将结果注入 prompt。"""
+def test_generate_reply_cloud_mode_returns_kb_answer():
+    """kb_mode='cloud' 时，generate_reply 应直接返回 query_cloud 的答案。
+
+    新实现：query_cloud 内部已完成 contract + claude 全流程，
+    ai_reply.generate_reply 在 cloud 模式下直接 return result.answer，
+    不再二次调用 mc。
+    """
     from unittest.mock import MagicMock
     fake_hss_result = MagicMock()
     fake_hss_result.answer = "借出流程：扫码→弹宝→计费。"
 
-    fake_run_result = MagicMock()
-    fake_run_result.returncode = 0
-    fake_run_result.stdout = "好的，为您说明借还流程。"
-
     with patch("ai_reply._hss_kb_available", return_value=True), \
-         patch("ai_reply._hss_kb_query", return_value=fake_hss_result) as mock_query, \
-         patch("ai_reply.subprocess.run", return_value=fake_run_result):
+         patch("ai_reply._hss_kb_query", return_value=fake_hss_result) as mock_query:
 
         config = AIReplyConfig(kb_mode="cloud", kb_scope="用户端", timeout=30)
         reply = generate_reply([{"content": "借还流程是什么"}], config)
@@ -351,7 +351,8 @@ def test_generate_reply_cloud_mode_injects_kb_answer():
     mock_query.assert_called_once()
     call_kwargs = mock_query.call_args[1]
     assert call_kwargs.get("scope") == "用户端"
-    assert reply == "好的，为您说明借还流程。"
+    # generate_reply 直接返回 query_cloud 的答案
+    assert reply == "借出流程：扫码→弹宝→计费。"
 
 
 def test_generate_reply_cloud_mode_raises_when_cli_missing():
