@@ -174,11 +174,10 @@ class DaxiangAdapter(IMClientAdapter):
 
         try:
             # 重试等待：AX 树在激活后需要 200-500ms 才完全展开
-            # 条件：窗口数 >= 2（main + chat panel）且有实质内容
             windows = None
             for _ in range(5):
                 _, windows = AXUIElementCopyAttributeValue(ax, kAXWindowsAttribute, None)
-                if windows and len(windows) >= 2:
+                if windows and len(windows) >= 1:
                     break
                 time.sleep(0.15)
 
@@ -190,22 +189,25 @@ class DaxiangAdapter(IMClientAdapter):
             if main_win is None:
                 return []
 
-            # BFS 收集 depth=22 的 AXStaticText，保留顺序
+            # BFS 收集 depth=22 的 AXStaticText，保留顺序。
+            # 排除 AXList 父节点下的节点（侧边栏会话列表，不是当前聊天内容）。
             texts: list[str] = []
-            queue: deque = deque([(main_win, 0)])
+            queue: deque = deque([(main_win, 0, False)])  # (el, depth, under_axlist)
             while queue:
-                el, d = queue.popleft()
+                el, d, under_list = queue.popleft()
                 if d > self._MSG_DEPTH:
                     continue
                 _, role = AXUIElementCopyAttributeValue(el, kAXRoleAttribute, None)
                 _, val = AXUIElementCopyAttributeValue(el, kAXValueAttribute, None)
-                if role == "AXStaticText" and val and d == self._MSG_DEPTH:
+                is_list = role == "AXList"
+                cur_under_list = under_list or is_list
+                if role == "AXStaticText" and val and d == self._MSG_DEPTH and not cur_under_list:
                     texts.append(str(val))
                 if d < self._MSG_DEPTH:
                     _, ch = AXUIElementCopyAttributeValue(el, kAXChildrenAttribute, None)
                     if ch:
                         for c in ch:
-                            queue.append((c, d + 1))
+                            queue.append((c, d + 1, cur_under_list))
 
             return _parse_daxiang_messages(texts, max_messages)
         except Exception:
@@ -237,14 +239,22 @@ def _parse_daxiang_messages(texts: list[str], max_messages: int) -> list[dict]:
     """
     将 depth=22 的 AXStaticText 序列解析为结构化消息列表。
 
-    解析规则：
-      1. 跳过开头的 UI 过滤器（未读/稍后/…）和图标字符
-      2. 时间戳 → 更新 current_time，开始新消息组
-      3. 短且符合姓名格式（≤15 字符，无空格/标点）且当前消息内容为空 → 发送者名
-      4. 其余 → 消息正文（可多行追加到当前消息）
-      5. 遇到新时间戳或新发送者时 flush 上一条消息
+    大象 AX 树中，每条消息的字段顺序不固定：
+      - 时间戳可以先于发送者出现，也可以在发送者之后
+      - 时间戳和发送者一起构成"消息头"（header），内容紧随其后
+      - 遇到新的时间戳或发送者时，若已有内容则 flush 上一条
+
+    解析状态机：
+      IN_HEADER: 正在收集时间/发送者（尚未遇到任何内容行）
+      IN_CONTENT: 已遇到至少一行内容，继续追加内容
+
+    遇到 TIME 或 SENDER：
+      - 若当前处于 IN_CONTENT 状态 → flush，开启新消息头
+      - 若当前处于 IN_HEADER 状态 → 更新头部字段（time/sender），不 flush
+    遇到 CONTENT：
+      - 追加到 content_parts，进入 IN_CONTENT 状态
     """
-    # 跳过开头 UI 元素
+    # 跳过开头 UI 元素（未读/稍后/@我/单聊/群聊/图标）
     start = 0
     while start < len(texts) and (texts[start] in _UI_TABS or _is_junk(texts[start])):
         start += 1
@@ -253,6 +263,7 @@ def _parse_daxiang_messages(texts: list[str], max_messages: int) -> list[dict]:
     current_time: str | None = None
     current_sender: str | None = None
     content_parts: list[str] = []
+    in_content = False  # True: 已有内容行，遇到 T/S 需要 flush
 
     def flush() -> None:
         body = "\n".join(p for p in content_parts if p.strip())
@@ -268,21 +279,26 @@ def _parse_daxiang_messages(texts: list[str], max_messages: int) -> list[dict]:
         if _is_junk(text):
             continue
 
-        if _TIME_RE.match(text):
-            # 时间戳 → flush 上一条，开启新时间段
-            flush()
-            content_parts = []
-            current_time = text
-            current_sender = None
-        elif _SENDER_RE.match(text):
-            # 姓名模式（2-4 汉字，可选 Pinyin）→ flush 上条，开始新发送者
-            # 不限制 content_parts 是否为空：同一时间段内多条消息各有自己的发送者名
-            flush()
-            content_parts = []
-            current_sender = text
+        is_time = bool(_TIME_RE.match(text))
+        is_sender = bool(_SENDER_RE.match(text))
+
+        if is_time or is_sender:
+            if in_content:
+                # 有内容在手，flush 上一条，开启新消息头
+                flush()
+                content_parts = []
+                current_time = None
+                current_sender = None
+                in_content = False
+            # 更新消息头字段（无论是否刚 flush）
+            if is_time:
+                current_time = text
+            else:
+                current_sender = text
         else:
-            # 消息正文（可多行）
+            # 消息正文
             content_parts.append(text)
+            in_content = True
 
     flush()
     return messages[-max_messages:]

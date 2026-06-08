@@ -2,6 +2,7 @@ import os
 import subprocess
 import unittest
 from unittest.mock import patch
+import pytest
 
 from ai_reply import (
     AICommandFailedError,
@@ -311,3 +312,74 @@ def test_generate_reply_fallback_to_add_dir_when_search_empty(tmp_path):
     cmd = mock_run.call_args[0][0]
     assert "--add-dir" in cmd
     assert "--add-file" not in cmd
+
+
+# ── Cloud KB 模式测试 ────────────────────────────────────────────────────────
+
+def test_build_reply_prompt_includes_cloud_kb_context():
+    """cloud_kb_context 非空时，prompt 中应包含云端知识库参考段落。"""
+    msgs = [{"sender": "对方", "content": "什么是借还流程", "time": "10:00"}]
+    prompt = build_reply_prompt(msgs, cloud_kb_context="借出流程：扫码→弹宝→计费。")
+    assert "云端知识库参考" in prompt
+    assert "借出流程：扫码→弹宝→计费。" in prompt
+
+
+def test_build_reply_prompt_no_cloud_section_when_empty():
+    """cloud_kb_context 为空时，prompt 中不应出现云端知识库段落。"""
+    msgs = [{"sender": "对方", "content": "你好", "time": "10:00"}]
+    prompt = build_reply_prompt(msgs, cloud_kb_context="")
+    assert "云端知识库参考" not in prompt
+
+
+def test_generate_reply_cloud_mode_returns_kb_answer():
+    """kb_mode='cloud' 时，generate_reply 应直接返回 query_cloud 的答案。
+
+    新实现：query_cloud 内部已完成 contract + claude 全流程，
+    ai_reply.generate_reply 在 cloud 模式下直接 return result.answer，
+    不再二次调用 mc。
+    """
+    from unittest.mock import MagicMock
+    fake_hss_result = MagicMock()
+    fake_hss_result.answer = "借出流程：扫码→弹宝→计费。"
+
+    with patch("ai_reply._hss_kb_available", return_value=True), \
+         patch("ai_reply._hss_kb_query", return_value=fake_hss_result) as mock_query:
+
+        config = AIReplyConfig(kb_mode="cloud", kb_scope="用户端", timeout=30)
+        reply = generate_reply([{"content": "借还流程是什么"}], config)
+
+    mock_query.assert_called_once()
+    call_kwargs = mock_query.call_args[1]
+    assert call_kwargs.get("scope") == "用户端"
+    # generate_reply 直接返回 query_cloud 的答案
+    assert reply == "借出流程：扫码→弹宝→计费。"
+
+
+def test_generate_reply_cloud_mode_raises_when_cli_missing():
+    """hss-kb CLI 不可用时，cloud 模式应抛出 AICommandFailedError。"""
+    with patch("ai_reply._hss_kb_available", return_value=False):
+        config = AIReplyConfig(kb_mode="cloud", timeout=30)
+        with pytest.raises(AICommandFailedError):
+            generate_reply([{"content": "你好"}], config)
+
+
+def test_generate_reply_backward_compat_kb_enabled_uses_local_path(tmp_path):
+    """旧配置 kb_enabled=True 且 kb_mode='none' 时应走本地知识库分支。"""
+    from unittest.mock import MagicMock
+    vault = str(tmp_path / "vault")
+    os.makedirs(vault)
+
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "本地知识库回复"
+
+    with patch("ai_reply.search", return_value=[]), \
+         patch("ai_reply.update_index"), \
+         patch("ai_reply.subprocess.run", return_value=fake_result) as mock_run:
+
+        config = AIReplyConfig(kb_enabled=True, kb_vault_path=vault, kb_mode="none")
+        generate_reply([{"content": "你好"}], config)
+
+    cmd = mock_run.call_args[0][0]
+    # 向后兼容路径：kb_enabled=True + kb_mode=none → 走 local 路径，应有 --add-dir
+    assert "--add-dir" in cmd

@@ -18,6 +18,12 @@ CONFIG_FILE = (
 _DEFAULTS: dict = {
     "kb_enabled": False,
     "kb_vault_path": "",
+    # kb_mode: "none" | "local" | "cloud"
+    # "local"  — 使用本地 Obsidian vault（FTS5 两级检索，需配置 kb_vault_path）
+    # "cloud"  — 使用 hss-kb-serve-entry 云端知识库（需安装 hss-kb CLI）
+    # "none"   — 不使用知识库
+    "kb_mode": "none",
+    "kb_scope": "",     # 云端模式的查询范围（服务名/模块名），可选
 }
 
 
