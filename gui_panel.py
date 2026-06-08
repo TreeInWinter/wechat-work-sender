@@ -1152,7 +1152,19 @@ class WXSenderApp:
     def _update_kb_row(self):
         """根据当前配置刷新知识库状态行外观。"""
         cfg = self._app_config
-        if cfg.get("kb_enabled") and cfg.get("kb_vault_path"):
+        # 向后兼容：旧配置只有 kb_enabled=True 时视为 local 模式
+        kb_mode = cfg.get("kb_mode", "none")
+        if kb_mode == "none" and cfg.get("kb_enabled"):
+            kb_mode = "local"
+
+        if kb_mode == "cloud":
+            scope = cfg.get("kb_scope", "")
+            scope_str = f" · {scope}" if scope else ""
+            self.kb_row.configure(fg_color="#e6f7ff", border_color="#91d5ff")
+            self.kb_row_label.configure(
+                text=f"☁️ 云端知识库已启用{scope_str}", text_color="#096dd9"
+            )
+        elif kb_mode == "local" and cfg.get("kb_vault_path"):
             vault_name = os.path.basename(cfg["kb_vault_path"]) or cfg["kb_vault_path"]
             count_str = ""
             if _kb_get_db_path and _sqlite3:
@@ -1188,7 +1200,7 @@ class WXSenderApp:
         win.withdraw()   # 先隐藏，定位后再显示，防止闪烁
         win.title("AI 知识库设置")
         win.resizable(False, False)
-        self._center_on_root(win, 400, 230)   # 内部调用 deiconify()
+        self._center_on_root(win, 420, 310)   # 内部调用 deiconify()
         win.lift()
         win.focus_force()
         win.grab_set()
@@ -1207,30 +1219,42 @@ class WXSenderApp:
         body = ctk.CTkFrame(win, fg_color="white", corner_radius=0)
         body.pack(fill="both", expand=True)
 
-        # 启用开关
-        row1 = ctk.CTkFrame(body, fg_color="transparent")
-        row1.pack(fill="x", padx=16, pady=(14, 6))
-        ctk.CTkLabel(
-            row1, text="启用知识库",
-            font=ctk.CTkFont(family="PingFang SC", size=12),
-        ).pack(side="left")
-        kb_var = ctk.BooleanVar(value=bool(self._app_config.get("kb_enabled")))
-        ctk.CTkSwitch(
-            row1, text="", variable=kb_var,
-            onvalue=True, offvalue=False, width=44,
-        ).pack(side="right")
+        # ── 知识库模式选择 ──
+        _MODE_LABELS = ["关闭", "本地知识库", "云端知识库"]
+        _MODE_VALUES = ["none", "local", "cloud"]
 
-        # Vault 路径
-        row2 = ctk.CTkFrame(body, fg_color="transparent")
-        row2.pack(fill="x", padx=16, pady=(0, 6))
+        # 向后兼容：旧配置只有 kb_enabled=True 时视为 local
+        _saved_mode = self._app_config.get("kb_mode", "none")
+        if _saved_mode == "none" and self._app_config.get("kb_enabled"):
+            _saved_mode = "local"
+        _init_label = _MODE_LABELS[_MODE_VALUES.index(_saved_mode)] if _saved_mode in _MODE_VALUES else "关闭"
+
+        row0 = ctk.CTkFrame(body, fg_color="transparent")
+        row0.pack(fill="x", padx=16, pady=(14, 8))
         ctk.CTkLabel(
-            row2, text="Vault 路径",
+            row0, text="知识库模式",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            width=72, anchor="w",
+        ).pack(side="left")
+        mode_var = ctk.StringVar(value=_init_label)
+        seg_btn = ctk.CTkSegmentedButton(
+            row0, values=_MODE_LABELS,
+            variable=mode_var,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            width=250,
+        )
+        seg_btn.pack(side="right")
+
+        # ── 本地知识库：Vault 路径行 ──
+        row_local = ctk.CTkFrame(body, fg_color="transparent")
+        ctk.CTkLabel(
+            row_local, text="Vault 路径",
             font=ctk.CTkFont(family="PingFang SC", size=12),
             width=72, anchor="w",
         ).pack(side="left")
         path_var = ctk.StringVar(value=self._app_config.get("kb_vault_path", ""))
         path_entry = ctk.CTkEntry(
-            row2, textvariable=path_var,
+            row_local, textvariable=path_var,
             height=30, corner_radius=6, border_width=1,
             border_color="#dce8ff",
             font=ctk.CTkFont(family="PingFang SC", size=11),
@@ -1250,16 +1274,48 @@ class WXSenderApp:
                 path_var.set(chosen)
 
         ctk.CTkButton(
-            row2, text="浏览…", width=60, height=30, corner_radius=6,
+            row_local, text="浏览…", width=60, height=30, corner_radius=6,
             fg_color="transparent", border_width=1, border_color="#dce8ff",
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(size=11),
             command=browse,
         ).pack(side="right")
 
+        # ── 云端知识库：查询范围行 ──
+        row_cloud = ctk.CTkFrame(body, fg_color="transparent")
+        ctk.CTkLabel(
+            row_cloud, text="查询范围",
+            font=ctk.CTkFont(family="PingFang SC", size=12),
+            width=72, anchor="w",
+        ).pack(side="left")
+        scope_var = ctk.StringVar(value=self._app_config.get("kb_scope", ""))
+        ctk.CTkEntry(
+            row_cloud, textvariable=scope_var,
+            height=30, corner_radius=6, border_width=1,
+            border_color="#dce8ff",
+            placeholder_text="可选：服务名/模块名，提升查询精度",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        ).pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        def _refresh_rows(label: str):
+            """根据所选模式显示/隐藏对应行。"""
+            if label == "本地知识库":
+                row_local.pack(fill="x", padx=16, pady=(0, 6))
+                row_cloud.pack_forget()
+            elif label == "云端知识库":
+                row_local.pack_forget()
+                row_cloud.pack(fill="x", padx=16, pady=(0, 6))
+            else:
+                row_local.pack_forget()
+                row_cloud.pack_forget()
+
+        # 初始显示
+        _refresh_rows(_init_label)
+        mode_var.trace_add("write", lambda *_: _refresh_rows(mode_var.get()))
+
         # ── Footer ──
         footer = ctk.CTkFrame(body, fg_color="transparent")
-        footer.pack(fill="x", padx=16, pady=(4, 14))
+        footer.pack(fill="x", padx=16, pady=(4, 14), side="bottom")
         footer.grid_columnconfigure((0, 1, 2), weight=1)
 
         def _start_rebuild_ui(target_path: str) -> None:
@@ -1303,14 +1359,20 @@ class WXSenderApp:
             threading.Thread(target=do_rebuild, daemon=True).start()
 
         def on_save():
-            if kb_var.get() and not path_var.get():
+            cur_label = mode_var.get()
+            cur_mode = _MODE_VALUES[_MODE_LABELS.index(cur_label)] if cur_label in _MODE_LABELS else "none"
+            new_path = path_var.get().strip()
+            new_scope = scope_var.get().strip()
+
+            if cur_mode == "local" and not new_path:
                 self._show_warning("请先选择 Obsidian Vault 路径")
                 return
-            new_enabled = kb_var.get()
-            new_path = path_var.get().strip()
-            old_path = self._app_config.get("kb_vault_path", "")
 
-            self._app_config["kb_enabled"] = new_enabled
+            old_path = self._app_config.get("kb_vault_path", "")
+            self._app_config["kb_mode"] = cur_mode
+            self._app_config["kb_scope"] = new_scope
+            # 向后兼容字段同步更新
+            self._app_config["kb_enabled"] = (cur_mode == "local")
             self._app_config["kb_vault_path"] = new_path
             try:
                 save_config(self._app_config)
@@ -1320,9 +1382,9 @@ class WXSenderApp:
             self._app_config = load_config()
             self._update_kb_row()
 
-            # 路径变更 或 当前 vault 从未被索引时，重建索引
+            # 本地模式路径变更 或 vault 从未被索引时，重建索引
             needs_rebuild = (
-                new_enabled and new_path and _kb_rebuild
+                cur_mode == "local" and new_path and _kb_rebuild
                 and (new_path != old_path or not _vault_is_indexed(new_path))
             )
             if needs_rebuild:
@@ -1337,7 +1399,7 @@ class WXSenderApp:
             font=ctk.CTkFont(family="PingFang SC", size=11),
             text_color="#888",
         )
-        status_lbl.pack(fill="x", padx=16, pady=(0, 4))
+        status_lbl.pack(fill="x", padx=16, pady=(0, 2))
 
         def on_cancel():
             win.destroy()
@@ -1372,7 +1434,7 @@ class WXSenderApp:
         btn_save.grid(row=0, column=2, padx=(4, 0), sticky="ew")
 
         def on_rebuild():
-            """手动重建索引：保持窗口打开，原地显示进度。"""
+            """手动重建索引：保持窗口打开，原地显示进度（仅本地模式有效）。"""
             cur_path = path_var.get().strip()
             if not cur_path:
                 self._show_warning("请先选择 Obsidian Vault 路径")
@@ -1380,7 +1442,11 @@ class WXSenderApp:
             if not _kb_rebuild:
                 return
             # 先保存当前设置
-            self._app_config["kb_enabled"] = kb_var.get()
+            cur_label = mode_var.get()
+            cur_mode = _MODE_VALUES[_MODE_LABELS.index(cur_label)] if cur_label in _MODE_LABELS else "none"
+            self._app_config["kb_mode"] = cur_mode
+            self._app_config["kb_scope"] = scope_var.get().strip()
+            self._app_config["kb_enabled"] = (cur_mode == "local")
             self._app_config["kb_vault_path"] = cur_path
             try:
                 save_config(self._app_config)
@@ -1627,6 +1693,8 @@ class WXSenderApp:
         ai_config = AIReplyConfig(
             kb_enabled=self._app_config.get("kb_enabled", False),
             kb_vault_path=self._app_config.get("kb_vault_path", ""),
+            kb_mode=self._app_config.get("kb_mode", "none"),
+            kb_scope=self._app_config.get("kb_scope", ""),
         )
 
         def generate_task():

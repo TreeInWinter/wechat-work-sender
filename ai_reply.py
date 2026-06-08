@@ -18,6 +18,21 @@ except ImportError:
     def update_index(*args, **kwargs):  # type: ignore[misc]
         return 0, 0
 
+try:
+    from hss_kb_client import (
+        query_cloud as _hss_kb_query,
+        is_available as _hss_kb_available,
+        HssKBUnavailableError,
+        HssKBTimeoutError,
+        HssKBQueryError,
+    )
+except ImportError:
+    _hss_kb_query = None       # type: ignore[assignment]
+    _hss_kb_available = None   # type: ignore[assignment]
+    HssKBUnavailableError = Exception   # type: ignore[assignment,misc]
+    HssKBTimeoutError = Exception       # type: ignore[assignment,misc]
+    HssKBQueryError = Exception         # type: ignore[assignment,misc]
+
 
 class AIReplyError(Exception):
     """Base class for AI reply generation failures."""
@@ -57,8 +72,14 @@ class AIReplyConfig:
     )
     timeout: int = 60
     max_messages: int = 20
-    kb_enabled: bool = False
+    kb_enabled: bool = False    # 保留向后兼容；新代码优先使用 kb_mode
     kb_vault_path: str = ""
+    # kb_mode: "none" | "local" | "cloud"
+    # "local"  — 本地 Obsidian vault（FTS5 两级检索）
+    # "cloud"  — hss-kb-serve-entry 云端知识库（需 hss-kb CLI）
+    # "none"   — 不启用知识库
+    kb_mode: str = "none"
+    kb_scope: str = ""          # 云端模式的查询范围（服务名/模块名），可选
 
 
 def _extract_query(messages: list[dict], n: int = 3) -> str:
@@ -82,13 +103,23 @@ def build_reply_prompt(
     messages: list[dict],
     max_messages: int = 20,
     kb_enabled: bool = False,
-    search_results=None,   # list[SearchResult] | None
+    search_results=None,          # list[SearchResult] | None
+    cloud_kb_context: str = "",   # 云端知识库查询结果，由 hss-kb ask sync 返回
 ) -> str:
     useful = [m for m in messages if str(m.get("content", "")).strip()]
     selected = useful[-max_messages:]
     transcript = "\n".join(_format_message(m) for m in selected)
 
-    # 候选文档段落（两级检索时注入）
+    # 云端知识库参考段落（hss-kb-serve-entry 返回的答案）
+    cloud_section = ""
+    if cloud_kb_context:
+        cloud_section = (
+            "以下是从云端知识库查询到的相关参考信息，请在生成回复时优先参考：\n\n"
+            "【云端知识库参考】\n"
+            f"{cloud_kb_context}\n\n"
+        )
+
+    # 候选文档段落（本地两级检索时注入）
     candidate_section = ""
     if search_results:
         lines = [
@@ -113,6 +144,7 @@ def build_reply_prompt(
         else ""
     )
     return (
+        f"{cloud_section}"
         f"{candidate_section}"
         f"{kb_preamble}"
         "你是 IM 聊天回复助手。请根据下面最近的聊天记录，生成一段可以直接发送的中文回复。\n\n"
@@ -199,63 +231,104 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
     if not any(str(m.get("content", "")).strip() for m in messages):
         raise AIEmptyResponseError("没有可用于生成回复的聊天内容")
 
-    if config.kb_enabled:
-        if not config.kb_vault_path:
+    # 确定实际 kb_mode（向后兼容：kb_enabled=True 且 kb_mode 未设置时视为 local）
+    effective_kb_mode = config.kb_mode
+    if effective_kb_mode == "none" and config.kb_enabled:
+        effective_kb_mode = "local"
+
+    # ── 云端知识库分支（hss-kb-serve-entry） ──
+    if effective_kb_mode == "cloud":
+        if _hss_kb_query is None:
             raise AICommandFailedError(
-                "知识库已启用但未配置路径，请在设置中选择 Obsidian vault 文件夹"
+                "hss_kb_client 模块未找到，请确认 hss_kb_client.py 存在"
             )
-        if not os.path.isdir(config.kb_vault_path):
+        if not (_hss_kb_available and _hss_kb_available()):
             raise AICommandFailedError(
-                f"知识库路径不存在或不是目录：{config.kb_vault_path}"
+                "hss-kb CLI 未安装，请运行: npm install -g @saas/hss-kb-cli"
             )
-
-    # ── 两级检索 ──
-    search_results = []
-    use_add_dir = False
-
-    if config.kb_enabled:
-        # 后台异步增量更新索引（不等结果）
-        def _bg_update(path: str) -> None:
-            try:
-                update_index(path)
-            except Exception:
-                pass  # vault 被删除或 db 锁定时静默忽略，下次调用重试
-
-        threading.Thread(target=_bg_update, args=(config.kb_vault_path,), daemon=True).start()
-        # 同步 FTS5 粗筛；任何意外异常均降级为 --add-dir
         query = _extract_query(messages)
+        cloud_kb_timeout = max(30, min(config.timeout - 10, 110))
         try:
-            search_results = search(query, config.kb_vault_path)
-        except Exception:
-            search_results = []
-        if not search_results:
-            use_add_dir = True  # 检索为空或出错，降级
+            result = _hss_kb_query(
+                query,
+                caller="wechat-work-sender",
+                scope=config.kb_scope,
+                timeout=cloud_kb_timeout,
+            )
+            cloud_kb_context = result.answer
+        except HssKBUnavailableError as exc:
+            raise AICommandFailedError(str(exc)) from exc
+        except HssKBTimeoutError as exc:
+            raise AICommandTimeoutError(str(exc)) from exc
+        except HssKBQueryError as exc:
+            raise AICommandFailedError(str(exc)) from exc
 
-    prompt = build_reply_prompt(
-        messages,
-        max_messages=config.max_messages,
-        kb_enabled=config.kb_enabled,
-        search_results=search_results if search_results else None,
-    )
-
-    if config.kb_enabled:
-        if use_add_dir:
-            cmd = [
-                config.command, "--code", "-p",
-                "--add-dir", config.kb_vault_path,
-                "--no-session-persistence",
-                prompt,
-            ]
-        else:
-            cmd = [
-                config.command, "--code", "-p",
-                "--no-session-persistence",
-            ]
-            for r in search_results:
-                cmd += ["--add-file", r.path]
-            cmd.append(prompt)
-    else:
+        prompt = build_reply_prompt(
+            messages,
+            max_messages=config.max_messages,
+            cloud_kb_context=cloud_kb_context,
+        )
         cmd = [config.command, *config.args, prompt]
+
+    else:
+        # ── 本地知识库 / 不使用知识库 ──
+        if effective_kb_mode == "local":
+            if not config.kb_vault_path:
+                raise AICommandFailedError(
+                    "知识库已启用但未配置路径，请在设置中选择 Obsidian vault 文件夹"
+                )
+            if not os.path.isdir(config.kb_vault_path):
+                raise AICommandFailedError(
+                    f"知识库路径不存在或不是目录：{config.kb_vault_path}"
+                )
+
+        # ── 两级检索 ──
+        search_results = []
+        use_add_dir = False
+
+        if effective_kb_mode == "local":
+            # 后台异步增量更新索引（不等结果）
+            def _bg_update(path: str) -> None:
+                try:
+                    update_index(path)
+                except Exception:
+                    pass  # vault 被删除或 db 锁定时静默忽略，下次调用重试
+
+            threading.Thread(target=_bg_update, args=(config.kb_vault_path,), daemon=True).start()
+            # 同步 FTS5 粗筛；任何意外异常均降级为 --add-dir
+            query = _extract_query(messages)
+            try:
+                search_results = search(query, config.kb_vault_path)
+            except Exception:
+                search_results = []
+            if not search_results:
+                use_add_dir = True  # 检索为空或出错，降级
+
+        prompt = build_reply_prompt(
+            messages,
+            max_messages=config.max_messages,
+            kb_enabled=(effective_kb_mode == "local"),
+            search_results=search_results if search_results else None,
+        )
+
+        if effective_kb_mode == "local":
+            if use_add_dir:
+                cmd = [
+                    config.command, "--code", "-p",
+                    "--add-dir", config.kb_vault_path,
+                    "--no-session-persistence",
+                    prompt,
+                ]
+            else:
+                cmd = [
+                    config.command, "--code", "-p",
+                    "--no-session-persistence",
+                ]
+                for r in search_results:
+                    cmd += ["--add-file", r.path]
+                cmd.append(prompt)
+        else:
+            cmd = [config.command, *config.args, prompt]
     try:
         result = subprocess.run(
             cmd,
