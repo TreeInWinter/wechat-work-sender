@@ -86,17 +86,22 @@ class QueryCloudTests(unittest.TestCase):
     @patch("hss_kb_client.subprocess.run")
     @patch("hss_kb_client.shutil.which", return_value="/usr/bin/hss-kb")
     def test_claude_bin_used_for_qa(self, _which, run_mock, _fetch, _resolve):
-        """新实现使用 claude CLI 执行问答，命令中应含 --dangerously-skip-permissions。"""
+        """新实现使用 mc --code -p 执行问答，不再依赖 claude --dangerously-skip-permissions。
+
+        修改背景：claude CLI 需要 ANTHROPIC_AUTH_TOKEN 等 Claude Code 会话变量，
+        GUI 在会话外运行时会返回 "Not logged in"。改为使用与普通 AI 回复相同的
+        mc --code -p 命令，mc 使用独立的 Meituan 内部认证，不受影响。
+        """
         run_mock.return_value = subprocess.CompletedProcess(
-            args=["claude"], returncode=0, stdout="充电宝借出流程：扫码→弹宝→计费。\n", stderr=""
+            args=["mc"], returncode=0, stdout="充电宝借出流程：扫码→弹宝→计费。\n", stderr=""
         )
         result = query_cloud("test", caller="wechat-work-sender")
-        # 找到调用 claude 的那次 run（含 --dangerously-skip-permissions）
-        claude_calls = [
-            call for call in run_mock.call_args_list
-            if "--dangerously-skip-permissions" in call[0][0]
-        ]
-        self.assertTrue(len(claude_calls) >= 1, "应有一次 claude --dangerously-skip-permissions 调用")
+        # 验证：调用了 AI 命令（默认 mc），且命令中含 --no-session-persistence
+        self.assertEqual(run_mock.call_count, 1, "应有一次 AI 命令调用")
+        cmd_args = run_mock.call_args[0][0]
+        self.assertIn("--no-session-persistence", cmd_args, "应使用 --no-session-persistence")
+        self.assertNotIn("--dangerously-skip-permissions", cmd_args,
+                         "不应再使用 claude --dangerously-skip-permissions")
 
     @patch("hss_kb_client._resolve_kb_root", return_value="")
     @patch("hss_kb_client._fetch_top_docs", return_value=[])

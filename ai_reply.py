@@ -247,13 +247,17 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
                 "hss-kb CLI 未安装，请运行: npm install -g @saas/hss-kb-cli"
             )
         query = _extract_query(messages)
-        # query_cloud 内部已完成 contract + mc 全流程，直接返回最终回答
+        # query_cloud 内部已完成检索 + AI 全流程，直接返回最终回答
+        # 传入 ai_command/ai_args 使用与普通回复相同的 mc 命令，
+        # 避免依赖 claude CLI 的 ANTHROPIC_AUTH_TOKEN（仅在 Claude Code 会话内有效）
         try:
             result = _hss_kb_query(
                 query,
                 caller="wechat-work-sender",
                 scope=config.kb_scope,
                 timeout=config.timeout,
+                ai_command=config.command,
+                ai_args=config.args,
             )
         except HssKBUnavailableError as exc:
             raise AICommandFailedError(str(exc)) from exc

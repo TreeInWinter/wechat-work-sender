@@ -187,28 +187,32 @@ def query_cloud(
     output_format: str = "纯文本",
     timeout: int = 180,
     quiet: bool = True,
+    ai_command: str = "",
+    ai_args: list | None = None,
 ) -> HssKBResult:
-    """用 hss-kb contract + mc 本地执行知识库问答。
+    """用 hss-kb query 检索文档，再调用 AI 命令本地回答。
 
     流程：
-      1. hss-kb contract --caller <caller> --intent <prompt> [--scope <scope>]
-         → 生成 AI 指令上下文（包含知识库目录索引、检索建议、执行步骤）
-      2. 把 contract 输出和用户问题拼成 prompt，传给 mc --code 执行
-         → mc 有文件读取能力，可直接读本地知识库文档
+      1. hss-kb query <prompt> --verbose → 检索 Top 文档路径
+      2. Python 直接读取文档内容，注入 prompt
+      3. 调用 ai_command（默认 mc --code -p）生成回答
 
     Args:
         prompt:        用户问题。
-        caller:        传给 --caller 的标识符（默认 wechat-work-sender）。
-        scope:         可选的查询范围（服务名/领域路径），传给 --scope。
-        output_format: 期望输出格式，传给 --output（默认"纯文本"）。
-        timeout:       最长等待秒数（默认 120）。
+        caller:        保留兼容，暂未使用。
+        scope:         保留兼容，暂未使用。
+        output_format: 保留兼容，暂未使用。
+        timeout:       最长等待秒数（默认 180）。
         quiet:         暂未使用，保留兼容。
+        ai_command:    AI 命令路径（默认自动探测 mc）。
+        ai_args:       AI 命令额外参数列表（默认 ["--code", "-p",
+                       "--tools", "", "--no-session-persistence"]）。
 
     Returns:
         HssKBResult(answer, raw_output)；成功时 error 为空字符串。
 
     Raises:
-        HssKBUnavailableError: hss-kb 或 mc 未安装。
+        HssKBUnavailableError: hss-kb 未安装或 AI 命令未找到。
         HssKBTimeoutError:     命令超时。
         HssKBQueryError:       命令返回非零退出码。
     """
@@ -216,19 +220,20 @@ def query_cloud(
         raise HssKBUnavailableError(
             f"hss-kb CLI 未安装，请运行: {INSTALL_HINT}"
         )
-    claude = _claude_bin()
-    if not (shutil.which("claude") or any(
-        os.path.exists(os.path.expanduser(p)) for p in _CLAUDE_CANDIDATES
-    )):
-        raise HssKBUnavailableError(
-            "claude CLI 未找到，请确认 Claude Code CLI 已安装并在 PATH 中"
-        )
+
+    # ── 确定 AI 命令（优先调用方传入，否则自动探测 mc） ──
+    # 注意：不再强依赖 claude CLI，改用 mc --code -p，避免
+    # Claude Code 会话外运行时 ANTHROPIC_AUTH_TOKEN 缺失导致 "Not logged in"。
+    if not ai_command:
+        ai_command = _mc_bin()
+    if ai_args is None:
+        ai_args = ["--code", "-p", "--tools", "", "--no-session-persistence"]
 
     # ── Step 1：hss-kb query 取 Top 文档路径，Python 直接读取内容 ──
     kb_root = _resolve_kb_root()
     doc_contents = _fetch_top_docs(prompt, kb_root, top_n=3)
 
-    # ── Step 2：组装完整 prompt，直接注入文档内容，无需 claude 再读文件 ──
+    # ── Step 2：组装完整 prompt，直接注入文档内容，无需 AI 再读文件 ──
     docs_section = ""
     if doc_contents:
         parts = [
@@ -248,35 +253,30 @@ def query_cloud(
         "如文档中没有相关信息，明确说明\"未找到\"，不要编造。"
     )
 
-    # 用 claude CLI 执行（--dangerously-skip-permissions，不再需要 --add-dir 读文件）
-    # 文档内容已注入 prompt，无需工具调用，--output-format text 确保纯文本输出
-    claude_cmd = [
-        _claude_bin(),
-        "--dangerously-skip-permissions",
-        "--print", "--no-session-persistence",
-        "--output-format", "text",
-        full_prompt,
-    ]
+    # ── Step 3：调用 AI 命令（文档已注入 prompt，无需工具调用） ──
+    cmd = [ai_command, *ai_args, full_prompt]
 
-    claude_timeout = timeout - 20  # 减去 query(~10s) + 读文件(~5s) 耗时
+    ai_timeout = timeout - 20  # 减去 query(~10s) + 读文件(~5s) 耗时
     try:
         mc_result = subprocess.run(
-            claude_cmd,
+            cmd,
             capture_output=True,
             text=True,
-            timeout=claude_timeout,
+            timeout=ai_timeout,
             check=False,
         )
     except FileNotFoundError as exc:
-        raise HssKBUnavailableError("claude CLI 未找到，请确认已安装") from exc
+        raise HssKBUnavailableError(
+            f"AI 命令未找到（{ai_command}），请确认已安装"
+        ) from exc
     except subprocess.TimeoutExpired as exc:
-        raise HssKBTimeoutError(f"知识库问答超时（{claude_timeout}s）") from exc
+        raise HssKBTimeoutError(f"知识库问答超时（{ai_timeout}s）") from exc
 
     raw = (mc_result.stdout or "").strip()
     if mc_result.returncode != 0:
         err = (mc_result.stderr or raw or "").strip()
         raise HssKBQueryError(
-            f"claude 返回错误（exitcode={mc_result.returncode}）: {err[:200]}"
+            f"AI 命令返回错误（exitcode={mc_result.returncode}）: {err[:200]}"
         )
 
     return HssKBResult(answer=raw, raw_output=raw)
