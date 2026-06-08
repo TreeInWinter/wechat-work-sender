@@ -191,7 +191,12 @@ focus_input(ax, max_depth=26, allow_with_value=True)
 
 **与企业微信的区别**：企业微信输入框在 depth=6 且 value=None；大象在 depth=23 且有占位符。`bfs_find_input` 加了 `allow_with_value` 参数支持这两种情况。
 
-**消息读取**：大象消息历史没有 AXTable，是 `AXStaticText` 散布在 depth=22-25，与侧边栏联系人列表混合。`read_chat_messages()` 目前返回 `[]`，待后续单独实现解析器。
+**消息读取（2026-06-08 更新）**：
+- depth=22（非 AXList 父节点）= 当前打开聊天的消息，AXList 父节点下的 = 侧边栏会话列表
+- BFS 时需携带 `under_axlist` 标志排除侧边栏；`windows >= 2` 判断改为 `>= 1`
+- 序列格式：时间戳和发送者名**顺序不固定**（T→S 或 S→T 均有），需用状态机解析（`in_content` 标志区分是否已进入内容区）
+- 大象 App 版本更新后 WebView 消息虚拟化：AX 树只暴露可见区域的少数消息文本，历史消息无法全量读取
+- `_SENDER_RE` 匹配 2-4 汉字+可选 `(Pinyin)`，不匹配英文开头的名称（如 `Xray平台`）
 
 ---
 
