@@ -18,6 +18,7 @@ import sys
 from datetime import datetime
 
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import messagebox, simpledialog
 from AppKit import NSWorkspace
 from ApplicationServices import (
@@ -783,34 +784,17 @@ class WXSenderApp:
                                           font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"))
         self.status_label.pack(side="left", padx=(4, 0))
 
-        ctk.CTkButton(status_frame, text="↻", width=32, height=32,
-                       corner_radius=8, fg_color="transparent",
-                       hover_color=PRIMARY_H, text_color="white",
-                       font=ctk.CTkFont(size=16),
-                       command=self._refresh_targets_and_status).pack(side="right", padx=8)
-
-        ctk.CTkButton(status_frame, text="⚙", width=32, height=32,
-                       corner_radius=8, fg_color="transparent",
-                       hover_color=PRIMARY_H, text_color="white",
-                       font=ctk.CTkFont(size=15),
-                       command=self._show_ai_settings).pack(side="right", padx=(0, 2))
-
-        ctk.CTkButton(status_frame, text="权限", width=48, height=30,
-                       corner_radius=8, fg_color="transparent",
-                       border_width=1, border_color="#4a9eff",
-                       hover_color=PRIMARY_H, text_color="white",
-                       font=ctk.CTkFont(size=11),
-                       command=self._show_permission_guide).pack(side="right", padx=(0, 4))
-
-        # 稳健性自检：检查各 IM 的 AX 结构是否仍符合预期（客户端更新可能致碎）
-        self.selfcheck_btn = ctk.CTkButton(
-            status_frame, text="🩺", width=32, height=30,
+        # ── 右侧：折叠菜单（设置/权限/自检/刷新等低频操作收起）+ 接管对象下拉 ──
+        # 「⋯」用原生 tk.Menu 弹出：macOS 原生菜单层级在浮动窗口之上，
+        # 不受主窗口 -topmost（NSFloatingWindowLevel）遮挡，无需临时关 topmost。
+        self.menu_btn = ctk.CTkButton(
+            status_frame, text="⋯", width=36, height=30,
             corner_radius=8, fg_color="transparent",
             hover_color=PRIMARY_H, text_color="white",
-            font=ctk.CTkFont(size=14),
-            command=self._run_self_check_async,
+            font=ctk.CTkFont(size=20, weight="bold"),
+            command=self._show_overflow_menu,
         )
-        self.selfcheck_btn.pack(side="right", padx=(0, 4))
+        self.menu_btn.pack(side="right", padx=(2, 8))
 
         self.target_menu = ctk.CTkOptionMenu(
             status_frame,
@@ -827,7 +811,7 @@ class WXSenderApp:
             dropdown_font=ctk.CTkFont(family="PingFang SC", size=11),
             command=self._on_target_change,
         )
-        self.target_menu.pack(side="right", padx=(0, 6))
+        self.target_menu.pack(side="right", padx=(0, 4))
         self._refresh_client_menu()
 
         # ── 模式切换 ──
@@ -874,12 +858,27 @@ class WXSenderApp:
         )
         self.group_menu.pack(side="left", padx=(6, 0))
 
-        ctk.CTkButton(group_frame, text="+ 新分组", width=64, height=28,
+        # 分组管理：新增 / 改名 / 删除（side=right 先 pack 者靠最右）
+        ctk.CTkButton(group_frame, text="＋", width=32, height=28,
                        corner_radius=8, fg_color="transparent",
                        border_width=1, border_color=PRIMARY,
                        text_color=PRIMARY, hover_color=CARD_BG,
+                       font=ctk.CTkFont(size=13),
+                       command=self._add_group).pack(side="right", padx=(4, 0))
+
+        ctk.CTkButton(group_frame, text="改名", width=44, height=28,
+                       corner_radius=8, fg_color="transparent",
+                       border_width=1, border_color="#d9d9d9",
+                       text_color="#666", hover_color="#f0f0f0",
                        font=ctk.CTkFont(size=11),
-                       command=self._add_group).pack(side="right")
+                       command=self._rename_group).pack(side="right", padx=(4, 0))
+
+        ctk.CTkButton(group_frame, text="删除", width=44, height=28,
+                       corner_radius=8, fg_color="transparent",
+                       border_width=1, border_color="#ffe0e0",
+                       text_color="#ff4d4f", hover_color="#fff0f0",
+                       font=ctk.CTkFont(size=11),
+                       command=self._delete_group).pack(side="right", padx=(4, 0))
 
         # ── 搜索 ──
         search_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
@@ -955,22 +954,9 @@ class WXSenderApp:
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=self._send_custom,
-        ).pack(fill="x", pady=(0, 5))
-
-        ctk.CTkButton(
-            bottom_frame, text="📋 读取聊天内容", height=34, corner_radius=10,
-            fg_color="transparent", border_width=1, border_color="#dce8ff",
-            text_color=PRIMARY, hover_color=CARD_BG,
-            font=ctk.CTkFont(family="PingFang SC", size=11),
-            command=self._read_chat,
         ).pack(fill="x")
 
-        ctk.CTkLabel(
-            bottom_frame,
-            text="快捷键：⌘F 搜索 · ⌘↩ 发送自定义 · ⌘1-9 发送可见话术 · Esc 清空搜索",
-            text_color="#8c8c8c",
-            font=ctk.CTkFont(family="PingFang SC", size=10),
-        ).pack(fill="x", pady=(6, 0))
+        # 读取聊天内容统一走「AI 助手 → 读取并生成」入口（话术页不再单设读取按钮）
 
         self.ai_view = ctk.CTkFrame(self.root, fg_color="transparent")
         self._build_ai_view()
@@ -1012,6 +998,26 @@ class WXSenderApp:
     def _refresh_targets_and_status(self):
         self._refresh_client_menu()
         self._check_status()
+
+    def _show_overflow_menu(self):
+        """折叠菜单：把刷新/设置/权限/自检等低频操作收进下拉，给状态栏腾空间。"""
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="刷新状态与接管对象", command=self._refresh_targets_and_status)
+        menu.add_separator()
+        menu.add_command(label="AI / 知识库设置…", command=self._show_ai_settings)
+        menu.add_command(label="权限引导…", command=self._show_permission_guide)
+        menu.add_command(label="AX 结构自检", command=self._run_self_check_async)
+        menu.add_separator()
+        menu.add_command(
+            label="快捷键：⌘F 搜索 · ⌘↩ 发送自定义 · ⌘1-9 发送话术 · Esc 清空",
+            state="disabled",
+        )
+        try:
+            x = self.menu_btn.winfo_rootx()
+            y = self.menu_btn.winfo_rooty() + self.menu_btn.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     def _current_window_bounds(self) -> tuple | None:
         if not self.current_client:
@@ -2261,7 +2267,7 @@ class WXSenderApp:
         if getattr(self, "_selfcheck_running", False):
             return
         self._selfcheck_running = True
-        self.selfcheck_btn.configure(state="disabled")
+        self.menu_btn.configure(state="disabled")
         clients = self.clients
 
         def task():
@@ -2278,7 +2284,7 @@ class WXSenderApp:
 
     def _self_check_done(self, results, err):
         self._selfcheck_running = False
-        self.selfcheck_btn.configure(state="normal")
+        self.menu_btn.configure(state="normal")
         if err is not None:
             self._show_warning(f"自检执行失败：{err}")
             return
@@ -2588,59 +2594,6 @@ class WXSenderApp:
 
         threading.Thread(target=send_task, daemon=True).start()
 
-    def _read_chat(self):
-        """读取当前接管对象的聊天内容并弹窗展示"""
-        self.status_label.configure(text="⏳ 读取中...")
-        client = self.current_client
-
-        def fetch():
-            try:
-                msgs = read_chat_with_client(client, max_messages=30)
-                self.root.after(0, lambda: self._show_chat_popup(msgs))
-            except UnsupportedClientAction as exc:
-                msg = str(exc)
-                self.root.after(0, lambda: self._show_warning(msg))
-                self.root.after(0, lambda: self.status_label.configure(text="接管能力待验证"))
-            except Exception as exc:
-                msg = f"读取失败: {exc}"
-                self.root.after(0, lambda: self._show_warning(msg))
-                self.root.after(0, lambda: self.status_label.configure(text="❌ 读取失败"))
-
-        threading.Thread(target=fetch, daemon=True).start()
-
-    def _show_chat_popup(self, msgs: list):
-        self._check_status()
-        win = ctk.CTkToplevel(self.root)
-        win.title("聊天内容")
-        win.geometry("500x480")
-        win.attributes("-topmost", True)
-
-        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        ctk.CTkLabel(header, text=f"共 {len(msgs)} 条消息",
-                      text_color="white",
-                      font=ctk.CTkFont(family="PingFang SC", size=12)).pack(
-            side="left", padx=12, pady=12)
-        ctk.CTkButton(header, text="✕", width=32, height=32, corner_radius=8,
-                       fg_color="transparent", hover_color=PRIMARY_H,
-                       text_color="white", font=ctk.CTkFont(size=14),
-                       command=win.destroy).pack(side="right", padx=8)
-
-        text_widget = ctk.CTkTextbox(
-            win, corner_radius=0, border_width=0,
-            font=ctk.CTkFont(family="PingFang SC", size=12),
-        )
-        text_widget.pack(fill="both", expand=True, padx=10, pady=10)
-
-        if not msgs:
-            text_widget.insert("end", f"未读取到消息，请先在{self._current_client_name()}中选中聊天窗口。")
-        else:
-            for m in msgs:
-                time_str = f"[{m['time']}]  " if m['time'] else ""
-                text_widget.insert("end", f"{time_str}{m['content']}\n\n")
-        text_widget.configure(state="disabled")
-
     def _add_group(self):
         name = self._ask_input("新分组", "请输入分组名称：")
         if name and name.strip():
@@ -2650,7 +2603,53 @@ class WXSenderApp:
                 save_phrases(self.phrases)
                 self.group_menu.configure(values=list(self.phrases.keys()))
                 self.group_var.set(name)
+                self.current_group = name
                 self._refresh_cards()
+            else:
+                self._show_warning(f"分组「{name}」已存在")
+
+    def _rename_group(self):
+        """重命名当前分组（保持原有顺序）。"""
+        old = self.group_var.get()
+        if not old or old not in self.phrases:
+            return
+        new = self._ask_input("重命名分组", f"将「{old}」重命名为：")
+        if not new or not new.strip():
+            return
+        new = new.strip()
+        if new == old:
+            return
+        if new in self.phrases:
+            self._show_warning(f"分组「{new}」已存在")
+            return
+        # 重建 dict 以保持分组顺序不变
+        self.phrases = {(new if k == old else k): v for k, v in self.phrases.items()}
+        save_phrases(self.phrases)
+        self.current_group = new
+        self.group_menu.configure(values=list(self.phrases.keys()))
+        self.group_var.set(new)
+        self._refresh_cards()
+
+    def _delete_group(self):
+        """删除当前分组及其全部话术（至少保留一个分组）。"""
+        group = self.group_var.get()
+        if not group or group not in self.phrases:
+            return
+        if len(self.phrases) <= 1:
+            self._show_warning("至少保留一个分组，无法删除最后一个分组")
+            return
+        count = len(self.phrases.get(group, []))
+        if not self._ask_yesno(
+            "确认删除分组",
+            f"确定删除分组「{group}」及其 {count} 条话术吗？\n此操作不可撤销。",
+        ):
+            return
+        self.phrases.pop(group, None)
+        save_phrases(self.phrases)
+        self.current_group = next(iter(self.phrases.keys()))
+        self.group_menu.configure(values=list(self.phrases.keys()))
+        self.group_var.set(self.current_group)
+        self._refresh_cards()
 
     def run(self):
         self.root.mainloop()
