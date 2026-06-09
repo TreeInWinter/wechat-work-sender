@@ -10,9 +10,12 @@ from ai_reply import (
     AICommandTimeoutError,
     AIEmptyResponseError,
     AIReplyConfig,
+    REFINE_PRESETS,
     build_reply_prompt,
+    build_refine_prompt,
     resolve_ai_command,
     generate_reply,
+    refine_reply,
 )
 
 
@@ -221,6 +224,76 @@ class ExtractKBEntryTests(unittest.TestCase):
         result = extract_kb_entry([{"content": "test"}], "reply", config)
         self.assertIsNotNone(result)
         self.assertEqual(result["title"], "t")
+
+
+class BuildRefinePromptTests(unittest.TestCase):
+    def test_includes_draft_instruction_and_context(self):
+        messages = [{"time": "10:01", "content": "客户：发票什么时候开？"}]
+        prompt = build_refine_prompt(messages, "稍后给您开具。", "更正式", max_messages=20)
+        self.assertIn("稍后给您开具。", prompt)        # 当前草稿
+        self.assertIn("更正式", prompt)                # 修改要求
+        self.assertIn("客户：发票什么时候开？", prompt)  # 聊天上下文
+        self.assertIn("只输出", prompt)                # 约束
+
+    def test_works_without_context(self):
+        prompt = build_refine_prompt([], "你好", "更简短")
+        self.assertIn("你好", prompt)
+        self.assertIn("更简短", prompt)
+        # 无聊天记录时不应包含上下文标题
+        self.assertNotIn("最近聊天记录", prompt)
+
+
+class RefineReplyTests(unittest.TestCase):
+    @patch("ai_reply.subprocess.run")
+    def test_returns_refined_stdout(self, run_mock):
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="您好，稍后将为您开具发票。", stderr=""
+        )
+        config = AIReplyConfig(command="mc", timeout=5)
+        result = refine_reply([{"content": "发票"}], "稍后开", "更正式", config)
+        self.assertEqual(result, "您好，稍后将为您开具发票。")
+
+    def test_empty_draft_raises(self):
+        config = AIReplyConfig(command="mc", timeout=5)
+        with pytest.raises(AIEmptyResponseError):
+            refine_reply([{"content": "x"}], "   ", "更正式", config)
+
+    def test_empty_instruction_raises(self):
+        config = AIReplyConfig(command="mc", timeout=5)
+        with pytest.raises(AICommandFailedError):
+            refine_reply([{"content": "x"}], "草稿", "  ", config)
+
+    @patch("ai_reply.subprocess.run", side_effect=subprocess.TimeoutExpired(["mc"], timeout=1))
+    def test_timeout_raises(self, _run_mock):
+        config = AIReplyConfig(command="mc", timeout=1)
+        with pytest.raises(AICommandTimeoutError):
+            refine_reply([{"content": "x"}], "草稿", "更简短", config)
+
+    @patch("ai_reply.subprocess.run", side_effect=FileNotFoundError)
+    def test_command_not_found_raises(self, _run_mock):
+        config = AIReplyConfig(command="nope", timeout=5)
+        with pytest.raises(AICommandNotFoundError):
+            refine_reply([{"content": "x"}], "草稿", "更简短", config)
+
+    @patch("ai_reply.subprocess.run")
+    def test_refine_never_reads_kb(self, run_mock):
+        """改写应走纯文本模式（config.args），不注入 --add-dir/--add-file。"""
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="改写结果", stderr=""
+        )
+        config = AIReplyConfig(
+            command="mc", timeout=5, kb_mode="local", kb_vault_path="/tmp"
+        )
+        refine_reply([{"content": "x"}], "草稿", "更正式", config)
+        cmd = run_mock.call_args.args[0]
+        self.assertNotIn("--add-dir", cmd)
+        self.assertNotIn("--add-file", cmd)
+        self.assertIn("--tools", cmd)  # 来自默认 config.args
+
+    def test_presets_are_nonempty_strings(self):
+        for key in ("formal", "shorter", "rephrase"):
+            self.assertIn(key, REFINE_PRESETS)
+            self.assertTrue(REFINE_PRESETS[key].strip())
 
 
 if __name__ == "__main__":

@@ -41,7 +41,9 @@ from ai_reply import (
     AICommandTimeoutError,
     AIEmptyResponseError,
     AIReplyConfig,
+    REFINE_PRESETS,
     generate_reply,
+    refine_reply,
     extract_kb_entry,
 )
 from kb_writer import KBEntry, save_to_vault
@@ -1105,7 +1107,50 @@ class WXSenderApp:
             self.ai_view, height=110, corner_radius=8, border_width=1,
             border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=12),
         )
-        self.ai_reply_box.pack(fill="x", padx=12, pady=(0, 8))
+        self.ai_reply_box.pack(fill="x", padx=12, pady=(0, 6))
+
+        # ── 一键改写（对话式微调）─────────────────────────────────
+        self.ai_refine_btns: list = []
+        refine_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        refine_frame.pack(fill="x", padx=12, pady=(0, 4))
+        refine_frame.grid_columnconfigure((0, 1, 2), weight=1)
+
+        for col, (key, label) in enumerate(
+            (("formal", "更正式"), ("shorter", "更简短"), ("rephrase", "换个说法"))
+        ):
+            btn = ctk.CTkButton(
+                refine_frame, text=label, height=28, corner_radius=8,
+                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                text_color=PRIMARY, hover_color=CARD_BG,
+                font=ctk.CTkFont(family="PingFang SC", size=11),
+                command=lambda k=key: self._ai_refine(REFINE_PRESETS[k]),
+            )
+            pad = (0, 3) if col == 0 else (3, 0) if col == 2 else (3, 3)
+            btn.grid(row=0, column=col, padx=pad, sticky="ew")
+            self.ai_refine_btns.append(btn)
+
+        # 自定义改写要求输入 + 应用
+        custom_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        custom_frame.pack(fill="x", padx=12, pady=(0, 8))
+        custom_frame.grid_columnconfigure(0, weight=1)
+
+        self.ai_refine_entry = ctk.CTkEntry(
+            custom_frame, height=28, corner_radius=8, border_width=1,
+            border_color="#dce8ff", placeholder_text="自定义修改要求，如：加上歉意、更口语化…",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        self.ai_refine_entry.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self.ai_refine_entry.bind("<Return>", lambda e: self._ai_refine_custom())
+
+        self.ai_refine_apply_btn = ctk.CTkButton(
+            custom_frame, text="应用", width=52, height=28, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            command=self._ai_refine_custom,
+        )
+        self.ai_refine_apply_btn.grid(row=0, column=1, sticky="e")
+        self.ai_refine_btns.append(self.ai_refine_apply_btn)
 
         utility_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
         utility_frame.pack(fill="x", padx=12, pady=(0, 6))
@@ -1687,6 +1732,7 @@ class WXSenderApp:
         self._ai_generating = True
         self.ai_generate_btn.configure(state="disabled")
         self.ai_regenerate_btn.configure(state="disabled")
+        self._ai_set_refine_enabled(False)
         self._ai_set_status("正在调用 AI 生成回复...")
         self._ai_start_loading_anim()
 
@@ -1720,14 +1766,91 @@ class WXSenderApp:
         self._ai_stop_loading_anim()
         self.ai_generate_btn.configure(state="normal")
         self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_refine_enabled(True)
         self._ai_set_reply(reply)
-        self._ai_set_status("AI 回复已生成，可编辑后发送")
+        self._ai_set_status("AI 回复已生成，可改写或编辑后发送")
 
     def _ai_generation_failed(self, message: str):
         self._ai_generating = False
         self._ai_stop_loading_anim()
         self.ai_generate_btn.configure(state="normal")
         self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_refine_enabled(True)
+        self._ai_set_status(message)
+
+    # ── 草稿改写（对话式微调）─────────────────────────────────
+
+    def _ai_set_refine_enabled(self, enabled: bool):
+        """统一启用/禁用所有改写按钮。"""
+        state = "normal" if enabled else "disabled"
+        for btn in getattr(self, "ai_refine_btns", []):
+            btn.configure(state=state)
+
+    def _ai_refine_custom(self):
+        """读取自定义输入框中的修改要求并应用。"""
+        instruction = self.ai_refine_entry.get().strip()
+        if not instruction:
+            self._ai_set_status("请先输入自定义修改要求")
+            return
+        self._ai_refine(instruction)
+
+    def _ai_refine(self, instruction: str):
+        """按修改要求改写当前草稿（以当前文本框内容为基准，支持多轮链式微调）。"""
+        if self._ai_generating:
+            return
+        draft = self._ai_get_reply()
+        if not draft:
+            self._ai_set_status("没有可改写的草稿，请先生成或输入回复")
+            return
+
+        self._ai_generating = True
+        self.ai_generate_btn.configure(state="disabled")
+        self.ai_regenerate_btn.configure(state="disabled")
+        self._ai_set_refine_enabled(False)
+        self._ai_set_status(f"正在改写：{instruction}")
+        self._ai_start_loading_anim()
+
+        ai_config = AIReplyConfig(
+            kb_enabled=self._app_config.get("kb_enabled", False),
+            kb_vault_path=self._app_config.get("kb_vault_path", ""),
+            kb_mode=self._app_config.get("kb_mode", "none"),
+            kb_scope=self._app_config.get("kb_scope", ""),
+        )
+        msgs = self._ai_messages
+
+        def refine_task():
+            try:
+                reply = refine_reply(msgs, draft, instruction, ai_config)
+                self.root.after(0, lambda: self._ai_refine_done(reply))
+            except (
+                AICommandNotFoundError,
+                AICommandTimeoutError,
+                AICommandFailedError,
+                AIEmptyResponseError,
+            ) as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: self._ai_refine_failed(msg))
+            except Exception as exc:
+                msg = f"改写失败: {exc}"
+                self.root.after(0, lambda: self._ai_refine_failed(msg))
+
+        threading.Thread(target=refine_task, daemon=True).start()
+
+    def _ai_refine_done(self, reply: str):
+        self._ai_generating = False
+        self._ai_stop_loading_anim()
+        self.ai_generate_btn.configure(state="normal")
+        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_refine_enabled(True)
+        self._ai_set_reply(reply)
+        self._ai_set_status("已改写，可继续微调或发送")
+
+    def _ai_refine_failed(self, message: str):
+        self._ai_generating = False
+        self._ai_stop_loading_anim()
+        self.ai_generate_btn.configure(state="normal")
+        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_refine_enabled(True)
         self._ai_set_status(message)
 
     def _ai_copy_reply(self):
