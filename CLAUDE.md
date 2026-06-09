@@ -248,6 +248,30 @@ focus_input(ax, max_depth=26, allow_with_value=True)
 
 ---
 
+### 13. AX depth 魔法数收敛到 `im_clients/probes.py` + 启动自检
+
+所有「AX 树固定 depth」的魔法数（企业微信输入框≤10/消息 AXTable@6、大象输入框≤26/消息
+AXStaticText@22、微信坐标点击偏移 50px）**收敛到 `probes.py` 的 `PROBES` 字典**，作为单一
+事实来源。`sender.py`、`daxiang.py`、`wechat.py` 从中读取常量，不再各写各的。客户端版本
+更新致 depth 偏移时，**只改 `probes.py` 一处**。
+
+```python
+PROBES["wechat_work"].input.max_depth   # 10（sender._WW_INPUT_MAX_DEPTH 从此读）
+PROBES["daxiang"].input.max_depth       # 26（DaxiangAdapter._INPUT_MAX_DEPTH 从此读）
+```
+
+**自检**（`probes.run_self_check` / `run_probe`）：BFS 验证各客户端的输入框/消息节点是否仍在
+预期 depth；找不到 → `STATUS_DEGRADED`（客户端可能已更新，需 `tools/explore_ax.py` 重探）。
+状态区分：`ok` / `degraded` / `no_window` / `no_permission`（`kAXErrorAPIDisabled=-25211`）/
+`not_running`。`ElementProbe.root` 标记 BFS 起点是 `app` 还是 `window`（大象输入框从 app 根算，
+消息从 window 根算，两者不同）。
+
+GUI：状态栏 🩺 按钮手动触发全量自检（激活逐个检查，弹窗汇总）；启动后 1.2s 做一次**被动**
+自检（`activate=False`，不抢焦点），只对「与激活无关的确定问题」告警——权限缺失，或微信
+（非 AX）窗口不可达——其余（AX 客户端非前台的 no_window）静默，避免误报。
+
+---
+
 ## 项目文件结构
 
 ```
@@ -258,6 +282,7 @@ build.spec        # PyInstaller 打包配置（arm64）
 build.sh          # 一键打包脚本（输出 dist/wechat-sender.dmg ~31MB）
 im_clients/
   base.py           # IMClientAdapter 基类、TakeoverCapabilities、UnsupportedClientAction
+  probes.py         # AX depth 魔法数单一事实来源 + 启动自检（run_self_check/run_probe）
   registry.py       # discover_clients()、choose_default_client()
   ax_helpers.py     # 通用 AX 工具（参数化 app_name）
   wechat_work.py    # 企业微信 adapter（委托 sender.py，verified=True）

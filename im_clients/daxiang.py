@@ -19,6 +19,9 @@ from .ax_helpers import (
     set_clipboard_text,
 )
 from .base import IMClientAdapter, TakeoverCapabilities, UnsupportedClientAction
+from .probes import get_probe as _get_probe
+
+_DX_PROBE = _get_probe("daxiang")
 
 
 class DaxiangAdapter(IMClientAdapter):
@@ -49,7 +52,9 @@ class DaxiangAdapter(IMClientAdapter):
     _PROCESS_NAME = "大象"
 
     # 大象输入框在 AX 树深处（depth=23 from window = depth=24 from app root）
-    _INPUT_MAX_DEPTH = 26
+    # depth 常量收敛到 im_clients/probes.py
+    _INPUT_MAX_DEPTH = _DX_PROBE.input.max_depth          # 26
+    _INPUT_ALLOW_WITH_VALUE = _DX_PROBE.input.allow_with_value  # True（占位符）
 
     def is_running(self) -> bool:
         for name in self.app_names:
@@ -93,7 +98,11 @@ class DaxiangAdapter(IMClientAdapter):
             return False
 
         try:
-            if not focus_input(ax, max_depth=self._INPUT_MAX_DEPTH, allow_with_value=True):
+            if not focus_input(
+                ax,
+                max_depth=self._INPUT_MAX_DEPTH,
+                allow_with_value=self._INPUT_ALLOW_WITH_VALUE,
+            ):
                 raise UnsupportedClientAction("大象未找到聊天输入框，请先选中一个聊天")
         except UnsupportedClientAction:
             raise
@@ -140,8 +149,8 @@ class DaxiangAdapter(IMClientAdapter):
                 os.unlink(tmp)
 
     # depth=22（from window）是当前聊天的消息区域
-    # depth=23 是侧边栏联系人列表，不包含在读取范围内
-    _MSG_DEPTH = 22
+    # depth=23 是侧边栏联系人列表，不包含在读取范围内（收敛到 probes.py）
+    _MSG_DEPTH = _DX_PROBE.message.exact_depth   # 22
 
     def read_chat_messages(self, max_messages: int = 20) -> list[dict]:
         """

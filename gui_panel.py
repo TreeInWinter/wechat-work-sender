@@ -35,6 +35,7 @@ from ApplicationServices import (
 from sender import NoChatWindowError
 from im_clients.base import UnsupportedClientAction
 from im_clients.registry import choose_default_client, discover_clients
+from im_clients import probes
 from ai_reply import (
     AICommandFailedError,
     AICommandNotFoundError,
@@ -761,6 +762,8 @@ class WXSenderApp:
         self._build_ui()
         self._bind_shortcuts()
         self.root.after(100, self._poll_snap)
+        # 启动后延迟做一次被动自检（不抢焦点），提示权限/窗口类问题
+        self.root.after(1200, self._startup_self_check)
 
     def _build_ui(self):
         # ── 状态栏 ──
@@ -798,6 +801,16 @@ class WXSenderApp:
                        hover_color=PRIMARY_H, text_color="white",
                        font=ctk.CTkFont(size=11),
                        command=self._show_permission_guide).pack(side="right", padx=(0, 4))
+
+        # 稳健性自检：检查各 IM 的 AX 结构是否仍符合预期（客户端更新可能致碎）
+        self.selfcheck_btn = ctk.CTkButton(
+            status_frame, text="🩺", width=32, height=30,
+            corner_radius=8, fg_color="transparent",
+            hover_color=PRIMARY_H, text_color="white",
+            font=ctk.CTkFont(size=14),
+            command=self._run_self_check_async,
+        )
+        self.selfcheck_btn.pack(side="right", padx=(0, 4))
 
         self.target_menu = ctk.CTkOptionMenu(
             status_frame,
@@ -2234,6 +2247,105 @@ class WXSenderApp:
         self.root.attributes("-topmost", False)
         messagebox.showwarning("提示", message)
         self.root.attributes("-topmost", True)
+
+    def _show_info(self, title: str, message: str):
+        """弹出信息框，临时关闭 topmost 确保可见"""
+        self.root.attributes("-topmost", False)
+        messagebox.showinfo(title, message)
+        self.root.attributes("-topmost", True)
+
+    # ── 稳健性自检 ───────────────────────────────────────────────
+
+    def _run_self_check_async(self):
+        """手动触发：对所有客户端做 AX 结构自检，在后台线程运行，完成后弹窗汇总。"""
+        if getattr(self, "_selfcheck_running", False):
+            return
+        self._selfcheck_running = True
+        self.selfcheck_btn.configure(state="disabled")
+        clients = self.clients
+
+        def task():
+            try:
+                results = probes.run_self_check(clients, activate=True)
+            except Exception as exc:
+                results = None
+                err = str(exc)
+            else:
+                err = None
+            self.root.after(0, lambda: self._self_check_done(results, err))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _self_check_done(self, results, err):
+        self._selfcheck_running = False
+        self.selfcheck_btn.configure(state="normal")
+        if err is not None:
+            self._show_warning(f"自检执行失败：{err}")
+            return
+
+        icon = {
+            probes.STATUS_OK: "✅",
+            probes.STATUS_DEGRADED: "⚠️",
+            probes.STATUS_NO_WINDOW: "⚠️",
+            probes.STATUS_NO_PERMISSION: "🔒",
+            probes.STATUS_NOT_RUNNING: "·",
+            probes.STATUS_SKIPPED: "·",
+        }
+        lines = [
+            f"{icon.get(r.status, '·')} {r.display_name}：{r.detail}"
+            for r in results
+        ]
+        problems = [r for r in results if r.is_problem]
+        body = "\n".join(lines) if lines else "没有可检查的客户端。"
+        if problems:
+            self._show_warning(
+                "AX 结构自检发现问题（客户端可能已更新）：\n\n" + body +
+                "\n\n若发送/读取失效，请用 tools/explore_ax.py 重新探测对应客户端的 AX 树。"
+            )
+        else:
+            self._show_info("AX 结构自检", "全部正常：\n\n" + body)
+
+    def _startup_self_check(self):
+        """
+        启动时被动自检（不激活窗口、不抢焦点）：检查「当前默认客户端」。
+
+        被动模式下不激活窗口，AX 客户端非前台时本就读不到窗口（no_window），
+        这属正常，不告警；只对「与激活无关、确实需要用户处理」的问题提示：
+          - 辅助功能权限缺失（no_permission）：持续性问题，必报
+          - 非 AX 客户端（微信）窗口不可达（no_window）：CGWindow 不依赖激活，可靠
+        深层 AX 结构异常需激活才能判定，留给手动 🩺 自检。
+        """
+        client = self.current_client
+        if client is None:
+            return
+
+        def task():
+            try:
+                result = probes.run_probe(client.adapter, activate=False)
+            except Exception:
+                return
+            probe = probes.get_probe(client.adapter.client_id)
+            worthy = result.status == probes.STATUS_NO_PERMISSION or (
+                probe is not None and not probe.uses_ax
+                and result.status == probes.STATUS_NO_WINDOW
+            )
+            if worthy:
+                self.root.after(0, lambda: self._show_startup_warning(result))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _show_startup_warning(self, result):
+        """在状态栏标题追加自检告警提示（不弹窗）。"""
+        hint = {
+            probes.STATUS_NO_PERMISSION: "需授予辅助功能权限",
+            probes.STATUS_NO_WINDOW: "未检测到窗口",
+            probes.STATUS_DEGRADED: "AX 结构异常，点 🩺 自检",
+        }.get(result.status, "自检异常")
+        try:
+            self.status_label.configure(text=f"{result.display_name}·{hint}")
+            self.status_dot.configure(text_color=DOT_WAIT)
+        except Exception:
+            pass
 
     def _ask_yesno(self, title: str, message: str) -> bool:
         """弹出确认框，临时关闭 topmost 确保可见"""
