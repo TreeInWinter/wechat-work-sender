@@ -178,20 +178,19 @@ class WechatAdapterSendTests(unittest.TestCase):
     def test_read_chat_returns_empty_when_no_window(self, mock_ocr):
         from im_clients.wechat import WechatAdapter
         adapter = WechatAdapter()
-        adapter._get_window_bounds = lambda: None  # 无窗口
         result = adapter.read_chat_messages()
         self.assertEqual(result, [])
 
     @patch("im_clients.wechat_ocr.read_chat_messages")
-    def test_read_chat_delegates_to_ocr_with_window_bounds(self, mock_ocr):
+    def test_read_chat_delegates_to_ocr(self, mock_ocr):
+        # 微信读取不再依赖 AX 窗口坐标，窗口由 wechat_ocr 内部经 CGWindowList 发现
         from im_clients.wechat import WechatAdapter
         mock_ocr.return_value = [{"sender": "对方", "content": "你好", "time": None}]
         adapter = WechatAdapter()
-        adapter._get_window_bounds = lambda: (100, 200, 800, 600)
         result = adapter.read_chat_messages(max_messages=5)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["content"], "你好")
-        mock_ocr.assert_called_once_with((100, 200, 800, 600), max_messages=5)
+        mock_ocr.assert_called_once_with(max_messages=5)
 
 
 class DaxiangAdapterSendTests(unittest.TestCase):

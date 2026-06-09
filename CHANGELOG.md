@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0.0] - 2026-06-09
+
+### Fixed
+- **微信消息读取真机修复（核心）**：此前 OCR 在真机上中文 0 识别，根因为 Vision 配置：
+  - `VNRecognizeTextRequest` 默认 revision=1 **只支持 en-US**，改为显式取最高可用 revision（≥2 才支持 zh-Hans）
+  - macOS 26 上 Accurate（level=1）中文模型损坏（全乱码、置信度恒 0.30/0.50），改用 Fast（level=0），置信度回到 1.00
+  - 截图从 `kCGWindowListOptionAll`+矩形（会截到遮挡窗口）改为按窗口 ID `kCGWindowListOptionIncludingWindow`，只截微信窗口
+  - 新增 `_filter_chat_area`：按 x 过滤左侧会话列表（避免名字/时间戳污染），并把面板内坐标归一化后再解析
+
+### Changed
+- 微信窗口发现从 AX（需「辅助功能」权限，独立运行时常报 `kAXErrorAPIDisabled`）改为 `find_main_window()`（CGWindowList，仅需「屏幕录制」权限）
+- `wechat.py` 读取链路不再依赖 `_get_window_bounds()`（AX），由 `wechat_ocr` 内部自行发现窗口
+- `tools/debug_ocr.py` 同步改用 Fast + revision，调试输出与线上行为一致
+- `_obs_to_dict` 增加 `confidence` 字段，低于阈值的 OCR 噪声在 `_filter_chat_area` 中丢弃
+
+### Added
+- 微信（个人版）`can_read_chat=True`，README 支持表更新为读取 ✅
+- `tests/test_wechat_ocr.py` 新增 `_filter_chat_area` 测试（侧边栏过滤 / 归一化 / 低置信 / 标题输入框过滤）
+
 ## [1.0.1.0] - 2026-06-08
 
 ### Changed
