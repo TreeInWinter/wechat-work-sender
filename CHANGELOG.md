@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0.0] - 2026-06-09
+
+### Added
+- **AI 草稿对话式微调**：候选回复区新增「一键改写」栏
+  - 三个预设：更正式 / 更简短 / 换个说法（`ai_reply.REFINE_PRESETS`）
+  - 自定义修改要求输入框 + 应用按钮（支持回车提交），如「加上歉意、更口语化」
+  - 以当前文本框内容为基准改写，支持多轮链式微调（改写结果可继续再改）
+  - `ai_reply.refine_reply()` / `build_refine_prompt()`：改写走纯文本模式（不读知识库），低延迟
+- 测试：`tests/test_ai_reply.py` 新增 `BuildRefinePromptTests` / `RefineReplyTests`（含空草稿、空要求、超时、命令缺失、不读 KB 等用例）
+
+### Changed
+- 抽出 `ai_reply._invoke_ai()` 统一 AI 命令调用与错误处理（generate/refine 共用错误语义）
+- 生成中（生成/改写）时改写按钮统一禁用，完成后恢复
+
 ## [1.1.0.0] - 2026-06-09
 
 ### Fixed

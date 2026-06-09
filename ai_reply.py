@@ -82,6 +82,15 @@ class AIReplyConfig:
     kb_scope: str = ""          # 云端模式的查询范围（服务名/模块名），可选
 
 
+# ── 草稿改写（refine）预设指令 ───────────────────────────────────
+# key 为按钮标识，value 为注入提示词的中文改写要求。
+REFINE_PRESETS: dict[str, str] = {
+    "formal": "把语气改得更正式、更专业、更得体",
+    "shorter": "在不丢失关键信息的前提下，让回复更简短、更精炼",
+    "rephrase": "用不同的表达方式重写，意思保持不变但措辞和句式换一种",
+}
+
+
 def _extract_query(messages: list[dict], n: int = 3) -> str:
     """取最后 n 条非空消息的内容拼成查询串。"""
     useful = [m for m in messages if str(m.get("content", "")).strip()]
@@ -355,3 +364,88 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
             f"AI 命令没有输出，请在终端确认可用：{visible_cmd} \"只输出两个字：可以\""
         )
     return reply
+
+
+# ── 草稿改写（对话式微调） ───────────────────────────────────────
+
+def build_refine_prompt(
+    messages: list[dict],
+    current_draft: str,
+    instruction: str,
+    max_messages: int = 20,
+) -> str:
+    """构造改写 prompt：给定聊天上下文 + 当前草稿 + 修改要求，输出改写后的回复。"""
+    useful = [m for m in messages if str(m.get("content", "")).strip()]
+    selected = useful[-max_messages:]
+    transcript = "\n".join(_format_message(m) for m in selected)
+    context_section = (
+        "最近聊天记录（格式：发送者 [时间]: 内容；发送者=我 表示你自己发的消息）：\n"
+        f"{transcript}\n\n"
+        if transcript
+        else ""
+    )
+    return (
+        "你是 IM 聊天回复助手。下面有一段「当前草稿回复」和一条「修改要求」，"
+        "请按修改要求改写这段草稿。\n\n"
+        "要求：\n"
+        "1. 只输出改写后的回复正文，不要标题、解释、Markdown 或代码块。\n"
+        "2. 保持原意，并与聊天上下文一致。\n"
+        "3. 严格按「修改要求」调整语气 / 长度 / 措辞。\n\n"
+        f"{context_section}"
+        f"当前草稿回复：\n{current_draft}\n\n"
+        f"修改要求：{instruction}\n\n"
+        "请输出改写后的回复："
+    )
+
+
+def _invoke_ai(cmd: list[str], config: AIReplyConfig) -> str:
+    """运行 AI 命令并返回 stdout 文本，失败时抛出对应的 AIReplyError。"""
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=config.timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise AICommandNotFoundError(f"未找到 AI 命令: {config.command}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AICommandTimeoutError("AI 生成超时，请稍后重试") from exc
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        raise AICommandFailedError(err or f"AI 命令退出码: {result.returncode}")
+
+    reply = (result.stdout or "").strip()
+    if not reply:
+        visible_cmd = " ".join(cmd[:6])
+        raise AIEmptyResponseError(f"AI 命令没有输出，请在终端确认可用：{visible_cmd}")
+    return reply
+
+
+def refine_reply(
+    messages: list[dict],
+    current_draft: str,
+    instruction: str,
+    config: AIReplyConfig | None = None,
+) -> str:
+    """
+    按修改要求改写当前草稿，返回改写后的回复。
+
+    instruction 可以是 REFINE_PRESETS 的预设文案，也可以是用户自定义要求。
+    改写不读知识库（始终用 config.args 的纯文本模式），保证低延迟、可多轮链式调用。
+    """
+    config = config or AIReplyConfig()
+    draft = (current_draft or "").strip()
+    if not draft:
+        raise AIEmptyResponseError("没有可改写的草稿内容")
+    instr = (instruction or "").strip()
+    if not instr:
+        raise AICommandFailedError("请提供修改要求")
+
+    prompt = build_refine_prompt(
+        messages, draft, instr, max_messages=config.max_messages
+    )
+    cmd = [config.command, *config.args, prompt]
+    return _invoke_ai(cmd, config)

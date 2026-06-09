@@ -152,6 +152,8 @@ AI 回复第一版使用 `mc --code -p --tools "" --no-session-persistence` 作�
 
 消息格式（`_format_message`）：`发送者 [时间]: 内容`，其中 `发送者=我` 表示自己发的消息。提示词为通用 IM 助手（不写死"企业微信客服"），支持多 IM（大象/微信/企业微信）。
 
+**草稿对话式微调（refine）**：`refine_reply(messages, current_draft, instruction, config)` 以当前草稿为基准按要求改写，GUI 提供「更正式/更简短/换个说法」预设（`REFINE_PRESETS`）+ 自定义输入。改写**故意走纯文本模式**（`config.args`，不注入 `--add-dir/--add-file`）以保证低延迟、可多轮链式调用——KB 检索只在首次 `generate_reply` 时做。`_invoke_ai()` 为 generate/refine 共用的命令执行+错误处理。
+
 ---
 
 ### 10.1 云端知识库查询必须用 mc，不能用 claude CLI

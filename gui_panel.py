@@ -41,7 +41,9 @@ from ai_reply import (
     AICommandTimeoutError,
     AIEmptyResponseError,
     AIReplyConfig,
+    REFINE_PRESETS,
     generate_reply,
+    refine_reply,
     extract_kb_entry,
 )
 from kb_writer import KBEntry, save_to_vault
@@ -1090,10 +1092,10 @@ class WXSenderApp:
         ).pack(fill="x", padx=14, pady=(4, 4))
 
         self.ai_context_box = ctk.CTkTextbox(
-            self.ai_view, height=140, corner_radius=8, border_width=1,
+            self.ai_view, height=100, corner_radius=8, border_width=1,
             border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=11),
         )
-        self.ai_context_box.pack(fill="x", padx=12, pady=(0, 8))
+        self.ai_context_box.pack(fill="x", padx=12, pady=(0, 6))
         self.ai_context_box.configure(state="disabled")
 
         ctk.CTkLabel(
@@ -1101,44 +1103,26 @@ class WXSenderApp:
             text_color="#333", font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
         ).pack(fill="x", padx=14, pady=(4, 4))
 
+        # 回复框 + 改写栏 + 工具/发送行。
+        # 关键：底部的工具行、发送行用 side="bottom" 且 **先于** 回复框 pack，
+        # 这样它们优先占据底部空间；回复框最后 pack（expand）吸收剩余高度。
+        # Tk 在空间不足时优先压缩最后 pack 的控件，因此回复框会先被压缩，
+        # 而发送/工具行始终完整可见，无论窗口多矮。
         self.ai_reply_box = ctk.CTkTextbox(
-            self.ai_view, height=110, corner_radius=8, border_width=1,
+            self.ai_view, height=88, corner_radius=8, border_width=1,
             border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=12),
         )
-        self.ai_reply_box.pack(fill="x", padx=12, pady=(0, 8))
 
-        utility_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
-        utility_frame.pack(fill="x", padx=12, pady=(0, 6))
-        utility_frame.grid_columnconfigure((0, 1), weight=1)
-
-        ctk.CTkButton(
-            utility_frame, text="复制", height=30, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#d9d9d9",
-            text_color="#666", hover_color="#f0f0f0",
-            font=ctk.CTkFont(size=11),
-            command=self._ai_copy_reply,
-        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
-
-        ctk.CTkButton(
-            utility_frame, text="清空", height=30, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#d9d9d9",
-            text_color="#666", hover_color="#f0f0f0",
-            font=ctk.CTkFont(size=11),
-            command=self._ai_clear_reply,
-        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
-
+        # ── 发送行（最先 pin 到最底部）──
         send_row = ctk.CTkFrame(self.ai_view, fg_color="transparent")
-        send_row.pack(fill="x", padx=12, pady=(0, 10))
         send_row.grid_columnconfigure(0, weight=3)
         send_row.grid_columnconfigure(1, weight=2)
-
         ctk.CTkButton(
             send_row, text="确认发送", height=36, corner_radius=10,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=self._ai_send_reply,
         ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
-
         self.ai_save_btn = ctk.CTkButton(
             send_row, text="💾 存入知识库", height=36, corner_radius=10,
             fg_color="transparent", border_width=1, border_color="#7c3aed",
@@ -1148,6 +1132,68 @@ class WXSenderApp:
             command=self._ai_kb_capture_async,
         )
         self.ai_save_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        # ── 工具行（复制 / 清空）──
+        utility_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        utility_frame.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkButton(
+            utility_frame, text="复制", height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=self._ai_copy_reply,
+        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        ctk.CTkButton(
+            utility_frame, text="清空", height=30, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#d9d9d9",
+            text_color="#666", hover_color="#f0f0f0",
+            font=ctk.CTkFont(size=11),
+            command=self._ai_clear_reply,
+        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        # ── 一键改写（对话式微调）：预设 + 自定义 ──
+        self.ai_refine_btns: list = []
+        refine_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        refine_frame.grid_columnconfigure((0, 1, 2), weight=1)
+        for col, (key, label) in enumerate(
+            (("formal", "更正式"), ("shorter", "更简短"), ("rephrase", "换个说法"))
+        ):
+            btn = ctk.CTkButton(
+                refine_frame, text=label, height=28, corner_radius=8,
+                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                text_color=PRIMARY, hover_color=CARD_BG,
+                font=ctk.CTkFont(family="PingFang SC", size=11),
+                command=lambda k=key: self._ai_refine(REFINE_PRESETS[k]),
+            )
+            pad = (0, 3) if col == 0 else (3, 0) if col == 2 else (3, 3)
+            btn.grid(row=0, column=col, padx=pad, sticky="ew")
+            self.ai_refine_btns.append(btn)
+
+        custom_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        custom_frame.grid_columnconfigure(0, weight=1)
+        self.ai_refine_entry = ctk.CTkEntry(
+            custom_frame, height=28, corner_radius=8, border_width=1,
+            border_color="#dce8ff", placeholder_text="自定义修改要求，如：加上歉意、更口语化…",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        self.ai_refine_entry.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        self.ai_refine_entry.bind("<Return>", lambda e: self._ai_refine_custom())
+        self.ai_refine_apply_btn = ctk.CTkButton(
+            custom_frame, text="应用", width=52, height=28, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            text_color=PRIMARY, hover_color=CARD_BG,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            command=self._ai_refine_custom,
+        )
+        self.ai_refine_apply_btn.grid(row=0, column=1, sticky="e")
+        self.ai_refine_btns.append(self.ai_refine_apply_btn)
+
+        # ── pack 顺序：底部控件先占位，回复框最后 expand 吸收余量 ──
+        send_row.pack(side="bottom", fill="x", padx=12, pady=(2, 10))
+        utility_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 6))
+        custom_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
+        refine_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 4))
+        self.ai_reply_box.pack(fill="both", expand=True, padx=12, pady=(0, 6))
 
     def _update_kb_row(self):
         """根据当前配置刷新知识库状态行外观。"""
@@ -1570,67 +1616,6 @@ class WXSenderApp:
     def _ai_get_reply(self) -> str:
         return self.ai_reply_box.get("1.0", "end").strip()
 
-    # ── 生成中动效 ───────────────────────────────────────────
-
-    @staticmethod
-    def _lerp_color(c1: str, c2: str, t: float) -> str:
-        """在两个 #rrggbb 颜色间线性插值。"""
-        r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
-        r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
-        return "#{:02x}{:02x}{:02x}".format(
-            round(r1 + (r2 - r1) * t),
-            round(g1 + (g2 - g1) * t),
-            round(b1 + (b2 - b1) * t),
-        )
-
-    def _ai_start_loading_anim(self):
-        """启动候选回复文本框的 AI 生成动效（边框呼吸 + 框内光标闪烁）。"""
-        self._ai_anim_running = True
-        self._ai_anim_tick = 0
-        tb = self.ai_reply_box._textbox
-        tb.tag_configure("anim_dot",  foreground=PRIMARY)
-        tb.tag_configure("anim_msg",  foreground="#a8bedc")
-        tb.tag_configure("anim_cur",  foreground=PRIMARY)
-        self._ai_anim_step()
-
-    def _ai_stop_loading_anim(self):
-        """停止动效，恢复边框颜色，清空占位文字，恢复文本框可编辑。"""
-        self._ai_anim_running = False
-        self.ai_reply_box.configure(border_color="#dce8ff")
-        # 恢复底层 tk.Text 为可编辑（_ai_anim_step 最后一次 tick 可能将其设为 disabled）
-        self.ai_reply_box._textbox.configure(state="normal")
-        self.ai_reply_box.delete("1.0", "end")
-
-    def _ai_anim_step(self):
-        if not self._ai_anim_running:
-            return
-        n = self._ai_anim_tick
-
-        # 边框呼吸：正弦波，周期 28 tick = 1.4s（50ms/tick）
-        t_border = (math.sin(n * math.pi / 14) + 1) / 2
-        self.ai_reply_box.configure(
-            border_color=self._lerp_color("#dce8ff", "#1677ff", t_border)
-        )
-
-        # 框内占位文字：彩色点 + 提示文字 + 闪烁光标
-        t_dot = (math.sin(n * math.pi / 10) + 1) / 2
-        dot_color = self._lerp_color("#a0c4ff", "#1677ff", t_dot)
-        cursor_char = "▋" if (n // 9) % 2 == 0 else " "
-
-        tb = self.ai_reply_box._textbox
-        tb.configure(state="normal")
-        tb.delete("1.0", "end")
-        tb.tag_configure("anim_dot", foreground=dot_color)
-        tb.insert("end", "⬤ ", "anim_dot")
-        tb.insert("end", "AI 正在生成回复", "anim_msg")
-        tb.insert("end", cursor_char, "anim_cur")
-        tb.configure(state="disabled")
-
-        self._ai_anim_tick += 1
-        self.root.after(50, self._ai_anim_step)
-
-    # ─────────────────────────────────────────────────────────
-
     def _format_ai_messages(self, msgs: list) -> str:
         lines = []
         for msg in msgs:
@@ -1687,6 +1672,7 @@ class WXSenderApp:
         self._ai_generating = True
         self.ai_generate_btn.configure(state="disabled")
         self.ai_regenerate_btn.configure(state="disabled")
+        self._ai_set_refine_enabled(False)
         self._ai_set_status("正在调用 AI 生成回复...")
         self._ai_start_loading_anim()
 
@@ -1720,14 +1706,91 @@ class WXSenderApp:
         self._ai_stop_loading_anim()
         self.ai_generate_btn.configure(state="normal")
         self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_refine_enabled(True)
         self._ai_set_reply(reply)
-        self._ai_set_status("AI 回复已生成，可编辑后发送")
+        self._ai_set_status("AI 回复已生成，可改写或编辑后发送")
 
     def _ai_generation_failed(self, message: str):
         self._ai_generating = False
         self._ai_stop_loading_anim()
         self.ai_generate_btn.configure(state="normal")
         self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_refine_enabled(True)
+        self._ai_set_status(message)
+
+    # ── 草稿改写（对话式微调）─────────────────────────────────
+
+    def _ai_set_refine_enabled(self, enabled: bool):
+        """统一启用/禁用所有改写按钮。"""
+        state = "normal" if enabled else "disabled"
+        for btn in getattr(self, "ai_refine_btns", []):
+            btn.configure(state=state)
+
+    def _ai_refine_custom(self):
+        """读取自定义输入框中的修改要求并应用。"""
+        instruction = self.ai_refine_entry.get().strip()
+        if not instruction:
+            self._ai_set_status("请先输入自定义修改要求")
+            return
+        self._ai_refine(instruction)
+
+    def _ai_refine(self, instruction: str):
+        """按修改要求改写当前草稿（以当前文本框内容为基准，支持多轮链式微调）。"""
+        if self._ai_generating:
+            return
+        draft = self._ai_get_reply()
+        if not draft:
+            self._ai_set_status("没有可改写的草稿，请先生成或输入回复")
+            return
+
+        self._ai_generating = True
+        self.ai_generate_btn.configure(state="disabled")
+        self.ai_regenerate_btn.configure(state="disabled")
+        self._ai_set_refine_enabled(False)
+        self._ai_set_status(f"正在改写：{instruction}")
+        self._ai_start_loading_anim()
+
+        ai_config = AIReplyConfig(
+            kb_enabled=self._app_config.get("kb_enabled", False),
+            kb_vault_path=self._app_config.get("kb_vault_path", ""),
+            kb_mode=self._app_config.get("kb_mode", "none"),
+            kb_scope=self._app_config.get("kb_scope", ""),
+        )
+        msgs = self._ai_messages
+
+        def refine_task():
+            try:
+                reply = refine_reply(msgs, draft, instruction, ai_config)
+                self.root.after(0, lambda: self._ai_refine_done(reply))
+            except (
+                AICommandNotFoundError,
+                AICommandTimeoutError,
+                AICommandFailedError,
+                AIEmptyResponseError,
+            ) as exc:
+                msg = str(exc)
+                self.root.after(0, lambda: self._ai_refine_failed(msg))
+            except Exception as exc:
+                msg = f"改写失败: {exc}"
+                self.root.after(0, lambda: self._ai_refine_failed(msg))
+
+        threading.Thread(target=refine_task, daemon=True).start()
+
+    def _ai_refine_done(self, reply: str):
+        self._ai_generating = False
+        self._ai_stop_loading_anim()
+        self.ai_generate_btn.configure(state="normal")
+        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_refine_enabled(True)
+        self._ai_set_reply(reply)
+        self._ai_set_status("已改写，可继续微调或发送")
+
+    def _ai_refine_failed(self, message: str):
+        self._ai_generating = False
+        self._ai_stop_loading_anim()
+        self.ai_generate_btn.configure(state="normal")
+        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_refine_enabled(True)
         self._ai_set_status(message)
 
     def _ai_copy_reply(self):
