@@ -73,13 +73,25 @@ uv pip install -r requirements.txt
 
 ---
 
-## 打包（Apple Silicon .dmg）
+## 打包（.dmg）
 
 ```bash
-./build.sh
+./build.sh             # 默认 arm64（Apple Silicon）
+./build.sh --universal2  # Intel + Apple Silicon 通用包（需 universal2 解释器）
 ```
 
-输出 `dist/wechat-sender.dmg`。安装与 Gatekeeper 说明见 [`docs/install-guide.md`](docs/install-guide.md)。
+输出 `dist/wechat-sender.dmg`。`--universal2` 会先用 `lipo` 预检解释器架构，
+Miniconda/uv 的 macOS Python 多为单架构 arm64，需改用 python.org universal2 安装器
+重建 venv——详见 [`docs/install-guide.md`](docs/install-guide.md)「universal2 通用包」。
+安装与 Gatekeeper 说明同见该文档。
+
+### 自动更新
+
+App 启动后会后台检查 `appcast.json`（默认仓库 raw 地址，可经 `WWS_APPCAST_URL`
+覆盖），发现新版时弹窗提示前往下载页手动安装；状态栏 **⬆** 按钮可手动检查。
+未签名 ad-hoc 分发不做静默自替换。发布新版时更新仓库根的 `appcast.json`
+（`version` / `download_url` / `notes`）即可。可在 `config.json` 设
+`update_check_enabled: false` 关闭启动检查。
 
 ---
 
@@ -91,6 +103,8 @@ sender.py         # 企业微信 AX API 核心（发送 / 读取 / 截图）
 ai_reply.py       # AI 回复生成 + KB 条目提炼
 kb_writer.py      # KB 条目写入 Obsidian vault
 config.py         # 应用配置读写（config.json）
+updater.py        # 自动更新检查（通知式，读 appcast.json）
+appcast.json      # 更新清单（最新版本 / 下载地址 / 更新说明）
 phrases.json      # 话术数据
 im_clients/       # IM 适配器（企业微信 / 微信 / 大象）
 tools/            # 调试工具（AX 树探测、OCR）

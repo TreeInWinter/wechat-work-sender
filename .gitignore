@@ -8,3 +8,11 @@ dist/
 .superpowers/
 config.json
 .worktrees/
+
+# Claude Code 本地配置与 skills（不上传远程）
+.claude/
+
+# skills 拉入的 Node 工具依赖（如 @mtfe/mtsso-auth）
+node_modules/
+package.json
+package-lock.json

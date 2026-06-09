@@ -1,0 +1,8 @@
+{
+  "version": "1.3.0.0",
+  "download_url": "https://github.com/TreeInWinter/wechat-work-sender/releases/latest/download/wechat-sender.dmg",
+  "page_url": "https://github.com/TreeInWinter/wechat-work-sender/releases/latest",
+  "notes": "首个支持自动更新检查的版本。",
+  "min_os": "10.15",
+  "pub_date": "2026-06-09"
+}

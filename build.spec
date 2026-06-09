@@ -1,8 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+
 from PyInstaller.utils.hooks import collect_all
 
-datas = [("phrases.json", ".")]
+# 目标架构：默认 arm64（Apple Silicon）。设 TARGET_ARCH=universal2 可产出
+# Intel + Apple Silicon 通用二进制——前提是当前解释器与所有原生 wheel 均为
+# universal2（用 python.org universal2 安装器建 venv），否则 PyInstaller 会报错。
+# 详见 docs/install-guide.md「universal2 通用包」一节与 build.sh 的预检。
+TARGET_ARCH = os.environ.get("TARGET_ARCH", "arm64")
+
+# VERSION 一并打包，供运行时 updater.get_current_version() 读取版本号。
+datas = [("phrases.json", "."), ("VERSION", ".")]
 binaries = []
 hiddenimports = []
 
@@ -41,7 +50,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
-    target_arch="arm64",
+    target_arch=TARGET_ARCH,
     codesign_identity=None,
     entitlements_file=None,
 )

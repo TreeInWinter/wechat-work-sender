@@ -49,6 +49,7 @@ from ai_reply import (
 )
 from kb_writer import KBEntry, save_to_vault
 from config import load_config, save_config
+import updater
 
 try:
     from kb_search import rebuild_index as _kb_rebuild, get_db_path as _kb_get_db_path
@@ -764,6 +765,8 @@ class WXSenderApp:
         self.root.after(100, self._poll_snap)
         # 启动后延迟做一次被动自检（不抢焦点），提示权限/窗口类问题
         self.root.after(1200, self._startup_self_check)
+        # 启动后延迟检查更新（后台线程，有新版才弹窗；可在配置中关闭）
+        self.root.after(2500, self._startup_update_check)
 
     def _build_ui(self):
         # ── 状态栏 ──
@@ -811,6 +814,16 @@ class WXSenderApp:
             command=self._run_self_check_async,
         )
         self.selfcheck_btn.pack(side="right", padx=(0, 4))
+
+        # 检查更新：手动触发，与启动后台检查复用同一逻辑
+        self.update_btn = ctk.CTkButton(
+            status_frame, text="⬆", width=30, height=30,
+            corner_radius=8, fg_color="transparent",
+            hover_color=PRIMARY_H, text_color="white",
+            font=ctk.CTkFont(size=15),
+            command=self._check_update_manual,
+        )
+        self.update_btn.pack(side="right", padx=(0, 4))
 
         self.target_menu = ctk.CTkOptionMenu(
             status_frame,
@@ -2346,6 +2359,71 @@ class WXSenderApp:
             self.status_dot.configure(text_color=DOT_WAIT)
         except Exception:
             pass
+
+    # ── 自动更新（通知式） ─────────────────────────────────────────
+
+    def _startup_update_check(self):
+        """启动后台检查更新：仅在发现新版时弹窗，静默处理无更新/出错。
+
+        可在 config.json 中设 update_check_enabled=false 关闭。
+        """
+        if not self._app_config.get("update_check_enabled", True):
+            return
+        self._run_update_check(silent=True)
+
+    def _check_update_manual(self):
+        """手动点击「⬆」：无论结果都给反馈（含「已是最新」「检查失败」）。"""
+        self._run_update_check(silent=False)
+
+    def _run_update_check(self, silent: bool):
+        if getattr(self, "_update_checking", False):
+            return
+        self._update_checking = True
+        if not silent:
+            self.update_btn.configure(state="disabled")
+
+        def task():
+            result = updater.check_for_update()
+            self.root.after(0, lambda: self._update_check_done(result, silent))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def _update_check_done(self, result, silent: bool):
+        self._update_checking = False
+        try:
+            self.update_btn.configure(state="normal")
+        except Exception:
+            pass
+
+        if result.error is not None:
+            if not silent:
+                self._show_warning(f"检查更新失败：{result.error}")
+            return
+
+        if not result.has_update:
+            if not silent:
+                self._show_info("检查更新", f"已是最新版本（当前 {result.current_version}）。")
+            return
+
+        ac = result.appcast
+        lines = [f"发现新版本 {ac.version}（当前 {result.current_version}）。"]
+        if ac.pub_date:
+            lines.append(f"发布日期：{ac.pub_date}")
+        if ac.notes:
+            lines.append("")
+            lines.append(ac.notes)
+        lines.append("")
+        lines.append("现在前往下载页手动安装？")
+        if self._ask_yesno("发现新版本", "\n".join(lines)):
+            self._open_update_url(ac.open_url)
+
+    def _open_update_url(self, url: str):
+        """在默认浏览器中打开下载/发布页。"""
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception as e:
+            self._show_warning(f"无法打开下载页：{e}\n请手动访问：{url}")
 
     def _ask_yesno(self, title: str, message: str) -> bool:
         """弹出确认框，临时关闭 topmost 确保可见"""
