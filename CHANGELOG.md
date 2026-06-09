@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0.0] - 2026-06-09
+
+### Added
+- **AX 结构探针 + 启动自检（稳健性）**：新增 `im_clients/probes.py`
+  - 把散落在 `sender.py`/`daxiang.py`/`wechat.py` 的 AX depth 魔法数收敛到 `PROBES` 字典（单一事实来源）
+  - `run_self_check()` / `run_probe()`：BFS 验证各客户端输入框/消息节点是否仍在预期 depth，
+    客户端更新致结构变化时返回 `degraded`，提前发现「发不出/读不到」
+  - 状态区分 `ok`/`degraded`/`no_window`/`no_permission`（`kAXErrorAPIDisabled=-25211`）/`not_running`
+  - GUI 状态栏新增 🩺 自检按钮（手动全量检查 + 弹窗汇总）
+  - 启动后 1.2s 被动自检（不激活、不抢焦点）：仅对权限缺失 / 微信窗口不可达等
+    「与激活无关的确定问题」在状态栏提示，避免误报
+- 测试：`tests/test_probes.py`（分类逻辑、配置完整性、run_probe 各状态分支）
+
+### Changed
+- `sender.py`/`daxiang.py`/`wechat.py` 的 AX depth 常量改为从 `probes.PROBES` 读取，行为不变
+- `probes.py` 在模块级导入 AX 符号，便于自检逻辑被单测 patch
+
 ## [1.2.0.0] - 2026-06-09
 
 ### Added

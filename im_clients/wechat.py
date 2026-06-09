@@ -17,6 +17,9 @@ from .ax_helpers import (
     set_clipboard_text,
 )
 from .base import IMClientAdapter, TakeoverCapabilities, UnsupportedClientAction
+from .probes import get_probe as _get_probe
+
+_WX_PROBE = _get_probe("wechat")
 
 
 class WechatAdapter(IMClientAdapter):
@@ -120,7 +123,7 @@ class WechatAdapter(IMClientAdapter):
             )
             x, y, w, h = bounds
             click_x = x + w / 2
-            click_y = y + h - 50  # 输入框在窗口底部中央，距底约 50px
+            click_y = y + h - _WX_PROBE.click_bottom_offset  # 输入框在窗口底部中央，距底约 50px
             p = CGPointMake(click_x, click_y)
             CGEventPost(kCGHIDEventTap, CGEventCreateMouseEvent(
                 None, kCGEventLeftMouseDown, p, kCGMouseButtonLeft))

@@ -65,6 +65,14 @@ class NoChatWindowError(Exception):
 # 模块一：窗口识别与激活
 # ============================================================
 
+# AX depth 常量收敛到 im_clients/probes.py（单一事实来源 + 启动自检）
+from im_clients.probes import get_probe as _get_probe
+
+_WW_PROBE = _get_probe("wechat_work")
+_WW_INPUT_MAX_DEPTH = _WW_PROBE.input.max_depth        # 输入框 AXTextArea 深度上限（10）
+_WW_MSG_DEPTH = _WW_PROBE.message.exact_depth          # 消息 AXTable 精确深度（6）
+_WW_MSG_MAX_DEPTH = _WW_PROBE.message.max_depth        # 消息 BFS 深度上限（8）
+
 WX_APP_NAME = "企业微信"
 
 
@@ -108,7 +116,7 @@ def _find_text_area(root):
     queue = deque([(root, 0)])
     while queue:
         element, depth = queue.popleft()
-        if depth > 10:
+        if depth > _WW_INPUT_MAX_DEPTH:
             continue
         try:
             _, role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute, None)
@@ -146,11 +154,11 @@ def _find_msg_table(root):
     queue = deque([(root, 0)])
     while queue:
         el, d = queue.popleft()
-        if d > 8:
+        if d > _WW_MSG_MAX_DEPTH:
             continue
         try:
             role = get_ax_attr(el, kAXRoleAttribute)
-            if role == "AXTable" and d == 6:
+            if role == "AXTable" and d == _WW_MSG_DEPTH:
                 return el
             children = get_ax_attr(el, kAXChildrenAttribute) or []
             for c in children:
