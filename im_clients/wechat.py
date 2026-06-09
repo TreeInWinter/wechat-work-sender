@@ -195,9 +195,9 @@ class WechatAdapter(IMClientAdapter):
 
         返回格式: [{"sender": str, "content": str, "time": str | None}]
         微信未运行或无窗口时返回 []。
+
+        窗口发现走 wechat_ocr.find_main_window()（CGWindowList，只需屏幕录制权限），
+        不依赖 AX/辅助功能——微信 Qt 渲染 AX 不透过，且独立运行时常无辅助功能权限。
         """
         from . import wechat_ocr
-        bounds = self._get_window_bounds()
-        if bounds is None:
-            return []
-        return wechat_ocr.read_chat_messages(bounds, max_messages=max_messages)
+        return wechat_ocr.read_chat_messages(max_messages=max_messages)

@@ -61,10 +61,16 @@ def run_ocr(ns_img) -> list[dict]:
         return []
     handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(png_data, None)
     request = Vision.VNRecognizeTextRequest.alloc().init()
-    request.setRecognitionLevel_(1)            # Accurate
-    request.setRecognitionLanguages_(["zh-Hans", "zh-Hant", "en"])
+    # 与 wechat_ocr 保持一致：revision≥2 才支持中文；macOS 26 上 Accurate 中文损坏，用 Fast
+    try:
+        revs = [r for r in (Vision.VNRecognizeTextRequest.supportedRevisions() or []) if r >= 2]
+        request.setRevision_(max(revs) if revs else 2)
+    except Exception:
+        pass
+    request.setRecognitionLevel_(0)            # Fast（中文可靠）
+    request.setRecognitionLanguages_(["zh-Hans", "zh-Hant", "en-US"])
     request.setUsesLanguageCorrection_(True)
-    request.setMinimumTextHeight_(0.01)        # 识别更小的文字
+    request.setMinimumTextHeight_(0.005)       # 识别更小的文字
     handler.performRequests_error_([request], None)
     results = list(request.results() or [])
     print(f"  OCR 共识别 {len(results)} 段文字")

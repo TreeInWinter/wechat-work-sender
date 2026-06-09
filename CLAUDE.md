@@ -187,12 +187,40 @@ def _click_input_area(self) -> bool:
 
 **根本原因**：微信 macOS 版使用 **Qt 渲染 UI**（非 Electron/Chromium），Qt 渲染层不向 macOS AX API 暴露内部 UI 元素（AX 树仅 6 个节点）。因此：
 - BFS 找输入框 → **失败**（树太浅）
-- 消息历史 AXTable → **不存在**（`can_read_chat=False`）
+- 消息历史 AXTable → **不存在**（AX 读不到，改用 OCR，见第 11.1 条）
 - 坐标点击输入框区域 → **可靠**（真机验证通过）
 
 **进程名**：AppleScript `tell process "WeChat"`（不是 "微信"）
 
 **与大象的区别**：大象使用 WebView 渲染（AXWebArea），AX 可穿透，输入框在 depth=23，走 BFS 路径（`allow_with_value=True`），无需坐标点击。
+
+---
+
+### 11.1 微信消息读取走 Vision OCR（真机验证 2026-06-09，macOS 26.5.1）
+
+微信 Qt 不暴露 AX 消息，改用「截图 + macOS Vision OCR」读取（`im_clients/wechat_ocr.py`）。
+`can_read_chat=True`。真机踩坑（**全部必做，缺一中文就识别不出**）：
+
+```python
+request = Vision.VNRecognizeTextRequest.alloc().init()
+request.setRevision_(3)          # ★ revision 1 仅支持 en-US！中文需 ≥2（取最高可用）
+request.setRecognitionLevel_(0)  # ★ Fast！macOS 26 上 Accurate(=1) 中文模型损坏，全乱码
+request.setRecognitionLanguages_(["zh-Hans", "zh-Hant", "en-US"])
+```
+
+| 坑 | 现象 | 解法 |
+|----|------|------|
+| **revision 默认=1** | 中文 0 识别，只认英文 | `setRevision_(最高可用，≥2)` |
+| **Accurate 中文损坏** | 中文全乱码，置信度恒为 0.30/0.50 | `setRecognitionLevel_(0)` 用 Fast，置信度回到 1.00 |
+| **截图抓错窗口** | 被遮挡时截到遮挡窗口（如系统设置）| 按窗口 ID `kCGWindowListOptionIncludingWindow`，不用 `OptionAll`+矩形 |
+| **侧边栏污染** | 左侧会话列表的名字/时间戳混进消息 | `_filter_chat_area` 按 x 过滤（`x_center<0.40`=侧边栏）再归一化 |
+
+**窗口发现用 CGWindowList 不用 AX**：`find_main_window()` 经 `CGWindowListCopyWindowInfo`
+（owner∈{微信,WeChat}、layer=0、width>400 取最大）拿窗口 ID + bounds，只需「屏幕录制」
+权限。AX 需「辅助功能」权限，GUI 独立运行时常没有（报 `kAXErrorAPIDisabled=-25211`）。
+
+**左右归属**：聊天面板内 `x_center>0.5`（面板归一化后）= 我，否则 = 对方。表情/贴纸
+会 OCR 成少量噪声（如 `%~`），可接受。调试用 `tools/debug_ocr.py`。
 
 ---
 
@@ -231,7 +259,8 @@ im_clients/
   registry.py       # discover_clients()、choose_default_client()
   ax_helpers.py     # 通用 AX 工具（参数化 app_name）
   wechat_work.py    # 企业微信 adapter（委托 sender.py，verified=True）
-  wechat.py         # 微信个人版 adapter（Qt 渲染，坐标点击，verified=True）
+  wechat.py         # 微信个人版 adapter（Qt 渲染，坐标点击发送，verified=True）
+  wechat_ocr.py     # 微信消息读取（CGWindowList 发现窗口 + Vision OCR，Fast+rev≥2）
   daxiang.py        # 大象 adapter（发送 + 读取 verified=True）
 tools/
   explore_ax.py     # AX 树探测工具（探测新 IM app 时用）
@@ -278,7 +307,7 @@ docs/
 
 8. **macOS 安装包**：`build.spec` 必须 `collect_all('customtkinter')` + `collect_all('tkinter')`，否则启动崩溃。`DATA_FILE` 必须在 `~/Library/Application Support/`，bundle 内只读。
 
-9. **微信 Qt 渲染 AX 不透过**：微信个人版 macOS 使用 Qt 渲染，AX 树只有 6 个节点，BFS 找不到输入框。改用坐标点击（窗口底部中央距底 50px）。`can_read_chat=False`（Qt 不暴露消息历史）。AppleScript 进程名为 `"WeChat"` 不是 `"微信"`。
+9. **微信 Qt 渲染 AX 不透过**：微信个人版 macOS 使用 Qt 渲染，AX 树只有 6 个节点，BFS 找不到输入框。发送改用坐标点击（窗口底部中央距底 50px）。**读取改用 Vision OCR**（`can_read_chat=True`，见第 11.1 条）：必须 `setRevision_(≥2)` + `setRecognitionLevel_(0/Fast)`，否则中文 0 识别。窗口发现用 CGWindowList（屏幕录制权限）不用 AX（辅助功能权限）。AppleScript 进程名为 `"WeChat"` 不是 `"微信"`。
 
 10. **新增 IM adapter 流程**：先用 `tools/explore_ax.py <app名> 12` 探测 AX 树（需先激活 app，否则 kAXWindowsAttribute 返回 0）。若 AX 树能暴露 AXTextArea，走 BFS 路径；若树浅（≤10节点），改用坐标点击路径（参考 wechat.py）。
 
