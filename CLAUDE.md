@@ -272,14 +272,42 @@ GUI：状态栏 🩺 按钮手动触发全量自检（激活逐个检查，弹�
 
 ---
 
+### 14. universal2 打包：解释器与所有原生 wheel 必须双架构
+
+`build.spec` 的 `target_arch` 读环境变量 `TARGET_ARCH`（默认 `arm64`）；`build.sh --universal2`
+会先用 `lipo -archs .venv/bin/python` 预检解释器是否双架构，**单架构则快速失败**并给指引。
+
+**根本约束**：PyInstaller 合成 universal2 要求解释器本身 + 每个 `.so` 都是 universal2。
+**Miniconda / Homebrew / `uv` 的 macOS Python 均为单架构 arm64**（`uv python` 发行版是
+`macos-aarch64`），无法直接产 universal2。需用 **python.org 官方 universal2 安装器**重建 venv，
+再装 universal2 wheel（Pillow / pyobjc 都有，customtkinter 纯 Python）。本机若只有 arm64
+解释器，只能产 arm64 包。
+
+### 15. 自动更新：未签名分发只做「通知式」，不静默自替换
+
+`updater.py`（纯逻辑，零网络耦合，全部可 mock 测试）：启动后 2.5s 后台拉 `appcast.json`
+（默认仓库 raw 地址，`WWS_APPCAST_URL` 可覆盖），`is_newer()` 判断后**仅在有新版时**弹窗
+引导用户去下载页手动装。状态栏 **⬆** 按钮手动检查。`check_for_update()` **绝不抛异常**，
+网络/解析错误收敛进 `UpdateCheckResult.error`，不拖累 GUI 启动。
+
+**为何不自替换**：App 未签名（`codesign_identity=None`），自替换 .app 会触发 Gatekeeper
+拦截、易损坏。版本号单一事实来源是 `VERSION` 文件（随包打入 `Contents/Frameworks/VERSION`，
+运行时经 `sys._MEIPASS` 读）。`config.json` 的 `update_check_enabled=false` 可关启动检查。
+发布新版只需更新仓库根 `appcast.json` 的 `version`/`download_url`/`notes`。
+
+---
+
 ## 项目文件结构
 
 ```
 gui_panel.py      # CustomTkinter GUI（BlockEditor、PhraseCard、发送逻辑）
 sender.py         # 核心：send_message/send_image/send_blocks/AX API/read_chat（企业微信）
+updater.py        # 自动更新检查（通知式，读 appcast.json，纯逻辑可 mock 测试）
+appcast.json      # 更新清单（version / download_url / notes，发布新版时改这里）
 phrases.json      # 话术数据（用户数据）
-build.spec        # PyInstaller 打包配置（arm64）
-build.sh          # 一键打包脚本（输出 dist/wechat-sender.dmg ~31MB）
+VERSION           # 版本号单一事实来源（随包打入，updater 运行时读取）
+build.spec        # PyInstaller 打包配置（target_arch 读 TARGET_ARCH，默认 arm64）
+build.sh          # 一键打包脚本（--universal2/--arm64，输出 dist/wechat-sender.dmg）
 im_clients/
   base.py           # IMClientAdapter 基类、TakeoverCapabilities、UnsupportedClientAction
   probes.py         # AX depth 魔法数单一事实来源 + 启动自检（run_self_check/run_probe）
@@ -343,6 +371,10 @@ docs/
 12. **大象消息读取**：大象无 AXTable，消息在 AXStaticText depth=22（from window）。前 6 个节点是 UI 过滤器（未读/稍后/@我/单聊/群聊/图标），跳过。之后按序：时间戳 → 发送者名（2-4 汉字）→ 消息正文。depth=23 是侧边栏，不读取。已实现，真机验证通过。
 
 13. **云端知识库查询不能用 claude CLI，用 mc**：`claude CLI` 依赖 `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_CUSTOM_HEADERS`，这两个 env 变量仅在 Claude Code 会话内动态注入，GUI 独立启动时不存在，导致 `"Not logged in"`。`hss_kb_client.query_cloud()` 使用 `ai_command`/`ai_args` 参数（由调用方传入 `mc` 路径），不硬编码 claude。
+
+14. **universal2 需双架构解释器**：`build.sh --universal2` 在单架构 arm64 venv（Miniconda/uv 默认）上会被 `lipo` 预检挡下并报错。要产 universal2 必须用 python.org universal2 安装器另建 venv。本机当前 venv 是 arm64-only，只能产 arm64 包。详见决策 #14。
+
+15. **自动更新只通知不自替换**：App 未签名，`updater.py` 仅在 `appcast.json` 有新版时弹窗引导手动下载安装，不静默替换 .app（会被 Gatekeeper 拦截/损坏）。版本号读 `VERSION` 文件（`sys._MEIPASS`）。发布新版改仓库根 `appcast.json`。详见决策 #15。
 
 ---
 

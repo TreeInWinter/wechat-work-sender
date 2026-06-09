@@ -24,6 +24,8 @@ _DEFAULTS: dict = {
     # "none"   — 不使用知识库
     "kb_mode": "none",
     "kb_scope": "",     # 云端模式的查询范围（服务名/模块名），可选
+    # 自动更新：启动时后台检查 appcast，发现新版才弹窗。设 false 可关闭。
+    "update_check_enabled": True,
 }
 
 

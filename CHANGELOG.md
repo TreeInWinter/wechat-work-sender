@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0.0] - 2026-06-09
+
+### Added
+- **universal2 打包支持**：`build.spec` 的 `target_arch` 改为读环境变量 `TARGET_ARCH`
+  （默认 `arm64`）；`build.sh` 新增 `--universal2` / `--arm64` 参数
+  - `--universal2` 会先用 `lipo` 预检解释器是否为双架构，单架构时快速失败并给出
+    用 python.org universal2 安装器重建 venv 的指引（Miniconda/uv 的 macOS Python
+    多为单架构 arm64，无法直接产出 universal2）
+  - `VERSION` 文件随包打入，供运行时读取版本号
+- **自动更新检查（通知式）**：新增 `updater.py`
+  - 启动后 2.5s 后台检查远端 `appcast.json`，发现新版才弹窗提示「前往下载」（手动安装）
+  - 状态栏新增 **⬆ 按钮**：手动检查更新（含「已是最新」「检查失败」反馈）
+  - 未签名 ad-hoc 分发不做静默自替换（会触发 Gatekeeper），只通知 + 引导
+  - appcast 地址可经环境变量 `WWS_APPCAST_URL` 或默认仓库 raw 地址配置
+  - `config.json` 新增 `update_check_enabled`（默认 true，可关闭启动检查）
+- 测试：`tests/test_updater.py`（版本解析/比较、appcast 解析、check_for_update 各分支、
+  网络/解析错误收敛、版本号读取）
+
+### Changed
+- `config._DEFAULTS` 新增 `update_check_enabled` 字段
+
 ## [1.3.0.0] - 2026-06-09
 
 ### Added
