@@ -731,6 +731,81 @@ class BlockEditor(ctk.CTkToplevel):
 # 话术卡片组件
 # ============================================================
 
+class SnapFilter:
+    """目标窗口读数可信性过滤（纯逻辑，单测在 tests/test_gui_panel_ui.py）。
+
+    只回答一个问题：本 tick 的目标窗口读数可信吗？「面板要不要动」由调用方
+    对比面板实际位置自行决定（自愈式贴靠，见 _poll_snap）——filter 不能替
+    调用方记"已经贴过了"，否则面板自身失同步（最小化恢复/被误拖）后永远
+    不再归位（已踩坑）。
+
+    - 大跳变（delta > max_delta）不永久丢弃：连续 confirm_ticks 个 tick 读到
+      一致的新位置（彼此差 ≤ consistency）→ 可信的真实大位移（最大化/换屏）。
+      旧实现丢弃时不更新基准导致永远拒绝（已踩坑）。单 tick AX 毛刺仍被拒。
+    - 目标消失（None：最小化/退出）→ 重新出现的首个读数无条件可信。
+    """
+
+    def __init__(self, max_delta: int = 300, confirm_ticks: int = 2,
+                 consistency: int = 8):
+        self.max_delta = max_delta
+        self.confirm_ticks = confirm_ticks
+        self.consistency = consistency
+        self.last = None          # 最近一次可信读数 (x, y, w, h)
+        self._absent = False      # 上一 tick 目标窗口不存在
+        self._candidate = None    # 待确认的大跳变候选
+        self._candidate_count = 0
+
+    def reset(self):
+        """清空基准，下一次读数直接可信（重新吸附/切换接管对象时调用）。"""
+        self.last = None
+        self._candidate = None
+        self._candidate_count = 0
+
+    def accept(self, bounds: tuple):
+        """写入外部已确认的真值（拖拽松手后的 AX 校正）。"""
+        self.last = bounds
+        self._candidate = None
+        self._candidate_count = 0
+
+    @staticmethod
+    def _delta(a: tuple, b: tuple) -> int:
+        return max(abs(n - o) for n, o in zip(a, b))
+
+    def validate(self, bounds: tuple | None) -> tuple | None:
+        """喂入一次读数，返回可信读数（None = 本 tick 无可信读数）。"""
+        if bounds is None:
+            self._absent = True
+            self._candidate = None
+            self._candidate_count = 0
+            return None
+        if self._absent or self.last is None:
+            self._absent = False
+            self.accept(bounds)   # 最小化恢复 / 首读 / reset 后：直接可信
+            return bounds
+        if self._delta(bounds, self.last) > self.max_delta:
+            if (self._candidate is not None
+                    and self._delta(bounds, self._candidate) <= self.consistency):
+                self._candidate_count += 1
+            else:
+                self._candidate = bounds
+                self._candidate_count = 1
+            if self._candidate_count >= self.confirm_ticks:
+                self.accept(bounds)
+                return bounds
+            return None
+        self.accept(bounds)
+        return bounds
+
+
+_GEO_POS_RE = re.compile(r"\+(-?\d+)\+(-?\d+)$")
+
+
+def parse_geometry_pos(geo: str) -> tuple | None:
+    """从 Tk geometry 字符串（'420x600+650+185'，负坐标为 '+-550'）解析位置。"""
+    m = _GEO_POS_RE.search(geo)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
 class DraftHistory:
     """草稿改写历史栈：refine/重新生成前压栈，支持逐级撤销（Grammarly/Notion 范式）。"""
 
@@ -928,13 +1003,18 @@ class WXSenderApp:
             self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
         else:
             self.root.geometry("420x600")
-        self._last_bounds = bounds
-        self._snap_threshold = 4      # 位置变化小于此值时不触发 geometry()（防 IME 抖动）
-        self._snap_max_delta = 300    # 单次跳变超过此值则认为 AX 数据异常，直接丢弃
+        # 读数过滤状态机：防 IME 抖动、拒单 tick 毛刺、最小化恢复立即回贴
+        self._snap_filter = SnapFilter()
+        if bounds:
+            self._snap_filter.accept(bounds)
+        self._drag_follow = None      # 拖拽跟随控制器（window_follow），失败时回退纯轮询
+        self._pending_drag_pos = None # handler 写入的最新预测位置，由 _poll_snap 高频泵消费
+        self._drag_end_pending = False
 
         self._build_ui()
         self._bind_shortcuts()
         self.root.after(100, self._poll_snap)
+        self.root.after(300, self._start_drag_follow)
         # 启动后延迟做一次被动自检（不抢焦点），提示权限/窗口类问题
         self.root.after(1200, self._startup_self_check)
 
@@ -1176,7 +1256,7 @@ class WXSenderApp:
             (client for client in self.clients if client.client_id == client_id),
             self.current_client,
         )
-        self._last_bounds = None
+        self._snap_filter.reset()
         self._check_status()
 
     def _refresh_targets_and_status(self):
@@ -2464,7 +2544,7 @@ class WXSenderApp:
         self._snap_enabled = not self._snap_enabled
         if self._snap_enabled:
             self.snap_btn.configure(text="脱离")
-            self._last_bounds = None  # 强制下一次轮询立即重新定位
+            self._snap_filter.reset()  # 强制下一次轮询立即重新定位
         else:
             self.snap_btn.configure(text="吸附")
 
@@ -2475,36 +2555,99 @@ class WXSenderApp:
         - 脱离吸附（_snap_enabled=False）时只重排下一次轮询，不动窗口，
           让用户能把面板拖到第二屏常驻。
         - 只更新位置（geometry "+x+y"），不写死高度——保留用户手动拉伸的高度。
-
-        过滤策略（防闪烁 + 防消失）：
-        - 小变化（< 4px）忽略：防止 IME 弹框引起的 1-2px 抖动触发重绘
-        - 大跳变（> 300px）丢弃：AX 数据异常保护，防止面板被送到屏幕外
+        - 目标读数可信性（拒毛刺/消失重现）委托 SnapFilter。
+        - **自愈式贴靠**：每 tick 对比「期望位置（目标右缘）vs 面板实际位置」，
+          偏离 ≥4px 才移动（兼防 IME 抖动）。面板自身失同步——最小化恢复被
+          macOS 放回旧位置、被用户误拖——都会在下一 tick 自动归位。
+          不能只跟踪目标窗口变化：面板最小化期间目标移动，filter 接受了新
+          位置，恢复后 delta=0 永远跳过，面板从此不跟（已踩坑）。
+        - 面板最小化（state != normal）时不调 geometry，恢复后靠自愈归位。
         """
         if not self._snap_enabled:
             self.root.after(100, self._poll_snap)
             return
 
-        bounds = self._current_window_bounds()
-        if not bounds:
+        # 拖拽进行中：切换为 8ms 高频泵，消费 handler 存下的最新预测位置。
+        # ⚠️ 面板只能经 geometry()（即经 _tkinter 进 Tcl）移动，绝不能用
+        # PyObjC setFrameOrigin_ 动 Tk 自己的 NSWindow——不管从哪个上下文调：
+        # PyObjC 释放 GIL 时不设 _tkinter 的 tcl_tstate，窗口移动同步触发
+        # TkMacOSX windowDidMove → CTk 的 <Configure> 回调 → ENTER_PYTHON
+        # 拿到 NULL 线程状态 → PyEval_RestoreThread fatal（两次踩坑）。
+        if self._drag_follow is not None and self._drag_follow.dragging:
+            pos = self._pending_drag_pos
+            if pos is not None and self._panel_visible():
+                self._pending_drag_pos = None
+                self.root.geometry(f"+{pos[0]}+{pos[1]}")
+            self.root.after(8, self._poll_snap)
+            return
+
+        # 拖拽刚结束：AX 真值校正 + geometry() 写回 Tk，然后退回 100ms 慢轮询
+        if self._drag_end_pending:
+            self._drag_end_pending = False
+            self._pending_drag_pos = None
+            self._snap_now()
             self.root.after(100, self._poll_snap)
             return
 
-        if self._last_bounds is not None:
-            delta = max(abs(n - o) for n, o in zip(bounds, self._last_bounds))
-            if delta < self._snap_threshold:
-                # 微抖动，忽略
-                self.root.after(100, self._poll_snap)
-                return
-            if delta > self._snap_max_delta:
-                # 异常跳变（AX 返回错误数据），丢弃本次读数
-                self.root.after(100, self._poll_snap)
-                return
-
-        # 确认更新：仅贴靠位置到目标窗口右缘，高度由用户掌控
-        self._last_bounds = bounds
-        wx, wy, ww, wh = bounds
-        self.root.geometry(f"+{wx + ww}+{wy}")
+        bounds = self._snap_filter.validate(self._current_window_bounds())
+        if bounds and self._panel_visible():
+            wx, wy, ww, wh = bounds
+            tx, ty = wx + ww, wy
+            # 自愈对比：面板实际位置偏离期望 ≥4px 才移动（高度由用户掌控）
+            cur = parse_geometry_pos(self.root.geometry())
+            if cur is None or abs(tx - cur[0]) >= 4 or abs(ty - cur[1]) >= 4:
+                self.root.geometry(f"+{tx}+{ty}")
         self.root.after(100, self._poll_snap)
+
+    def _panel_visible(self) -> bool:
+        """面板是否处于可移动的正常显示状态（最小化/隐藏时不调 geometry）。"""
+        try:
+            return self.root.state() == "normal"
+        except Exception:
+            return True
+
+    # ── 拖拽跟随（window_follow）：目标窗口被拖动时面板逐事件同步，松手 AX 校正 ──
+
+    def _start_drag_follow(self):
+        try:
+            from window_follow import DragFollowController
+            ctrl = DragFollowController(
+                get_target_bounds=self._current_window_bounds,
+                get_owner_names=self._current_owner_names,
+                on_drag_move=self._on_target_dragged,
+                on_drag_end=self._on_target_drag_end,
+            )
+            if ctrl.start():
+                self._drag_follow = ctrl
+        except Exception:
+            self._drag_follow = None  # 监听不可用时静默回退到 100ms 轮询
+
+    def _current_owner_names(self) -> tuple:
+        if not self.current_client:
+            return ()
+        return tuple(self.current_client.adapter.app_names)
+
+    def _on_target_dragged(self, bounds):
+        # ⚠️ 在 NSEvent handler 上下文回调：只允许纯 Python 赋值，
+        # 不能碰 Tk / 不能动 NSWindow（GIL 冲突致命崩溃，见 _poll_snap 注释）。
+        # 实际移动由 _poll_snap 的 8ms 高频泵消费执行。
+        wx, wy, ww, wh = bounds
+        self._pending_drag_pos = (wx + ww, wy)
+
+    def _on_target_drag_end(self):
+        # 同上：handler 上下文只置标志，校正动作由 _poll_snap 执行。
+        self._drag_end_pending = True
+
+    def _snap_now(self):
+        if not self._snap_enabled:
+            return
+        bounds = self._current_window_bounds()
+        if not bounds:
+            return
+        self._snap_filter.accept(bounds)
+        if self._panel_visible():
+            wx, wy, ww, wh = bounds
+            self.root.geometry(f"+{wx + ww}+{wy}")
 
     def _set_status_text(self, text: str):
         """状态文字统一入口：写入隐藏 label（兼容）+ _status_text（状态点 toast）。"""
