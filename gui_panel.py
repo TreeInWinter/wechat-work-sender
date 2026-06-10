@@ -851,6 +851,8 @@ class WXSenderApp:
         self._selected_card = None  # 当前选中的卡片
         self._visible_phrases = []
         self._search_after_id = None
+        self._toast_label = None
+        self._toast_after_id = None
         self.mode_var = ctk.StringVar(value="phrases")
         self._ai_messages = []
         self._ai_origin_draft = ""   # 本轮 AI 首次生成的原稿，用于发送时对比沉淀 diff
@@ -2023,7 +2025,7 @@ class WXSenderApp:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(reply)
-        self._ai_set_status("候选回复已复制")
+        self._show_toast("已复制")
 
     def _ai_clear_reply(self):
         self._ai_set_reply("")
@@ -2237,7 +2239,7 @@ class WXSenderApp:
                 filename = os.path.basename(saved_path)
                 win.destroy()
                 self.root.attributes("-topmost", True)
-                self._ai_set_status(f"✓ 已存入知识库：{filename}")
+                self._show_toast(f"已存入知识库：{filename}")
             except OSError as exc:
                 win.grab_release()
                 self._show_warning(f"写入失败：{exc}")
@@ -2609,6 +2611,38 @@ class WXSenderApp:
         self.root.attributes("-topmost", True)
         return result
 
+    def _show_toast(self, message: str, duration_ms: int = 1800):
+        """轻量浮层提示：主窗底部居中，自动消失，不抢焦点（替代弹窗/状态栏瞬时反馈）。"""
+        old = getattr(self, "_toast_label", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        if getattr(self, "_toast_after_id", None):
+            try:
+                self.root.after_cancel(self._toast_after_id)
+            except Exception:
+                pass
+        toast = ctk.CTkLabel(
+            self.root, text=f"  {message}  ",
+            fg_color="#323232", text_color="#FFFFFF",
+            corner_radius=13, height=26,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+        toast.place(relx=0.5, rely=1.0, y=-52, anchor="s")
+        self._toast_label = toast
+
+        def _dismiss():
+            try:
+                toast.destroy()
+            except Exception:
+                pass
+            self._toast_label = None
+            self._toast_after_id = None
+
+        self._toast_after_id = self.root.after(duration_ms, _dismiss)
+
     def _show_warning(self, message: str):
         """弹出警告框，临时关闭 topmost 确保可见"""
         self.root.attributes("-topmost", False)
@@ -2933,7 +2967,7 @@ class WXSenderApp:
             try:
                 send_blocks_with_client(client, blocks)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
-                self.root.after(0, lambda: self.status_label.configure(text="发送成功"))
+                self.root.after(0, lambda: self._show_toast("已发送"))
             except UnsupportedClientAction as e:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
@@ -2948,10 +2982,10 @@ class WXSenderApp:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
-                self.root.after(0, lambda: self.status_label.configure(text="图片文件不存在"))
+                self.root.after(0, lambda: self._show_toast("发送失败：图片文件不存在"))
             except Exception:
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
-                self.root.after(0, lambda: self.status_label.configure(text="发送失败"))
+                self.root.after(0, lambda: self._show_toast("发送失败"))
             self.root.after(3000, self._check_status)
 
         threading.Thread(target=send_task, daemon=True).start()
