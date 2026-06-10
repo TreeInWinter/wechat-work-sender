@@ -912,6 +912,16 @@ class WXSenderApp:
         )
         self.menu_btn.pack(side="right", padx=(2, 10))
 
+        # 视图切换：草稿台 ⇄ 话术（草稿台为主界面，话术降为辅助视图）
+        self.view_toggle_btn = ctk.CTkButton(
+            status_frame, text="话术", width=48, height=30,
+            corner_radius=8, fg_color="transparent",
+            hover_color=PILL_HOVER, text_color=TEXT_SUB,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            command=self._toggle_view,
+        )
+        self.view_toggle_btn.pack(side="right", padx=(0, 2))
+
         # 吸附/脱离开关：按钮文字即「下一步动作」——吸附时显示「脱离」，脱离时显示「吸附」
         self.snap_btn = ctk.CTkButton(
             status_frame, text="脱离", width=44, height=30,
@@ -947,30 +957,8 @@ class WXSenderApp:
         # 标题栏底部 1px 细分隔线
         ctk.CTkFrame(self.root, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
 
-        # ── 模式切换 ──
-        self.mode_frame = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.mode_frame.pack(fill="x", padx=12, pady=(10, 4))
-        self.mode_frame.grid_columnconfigure((0, 1), weight=1)
-
-        self.phrase_mode_btn = ctk.CTkButton(
-            self.mode_frame, text="话术", height=30, corner_radius=8,
-            fg_color=PRIMARY, hover_color=PRIMARY_H,
-            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
-            command=lambda: self._switch_mode("phrases"),
-        )
-        self.phrase_mode_btn.grid(row=0, column=0, padx=(0, 4), sticky="ew")
-
-        self.ai_mode_btn = ctk.CTkButton(
-            self.mode_frame, text="AI 助手", height=30, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color=BORDER,
-            text_color=PRIMARY, hover_color=CARD_BG,
-            font=ctk.CTkFont(family="PingFang SC", size=12),
-            command=lambda: self._switch_mode("ai"),
-        )
-        self.ai_mode_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
-
+        # 草稿台即主界面（spec v2）：双模式切换行已移除，「话术」入口在顶栏。
         self.phrase_view = ctk.CTkFrame(self.root, fg_color="transparent")
-        self.phrase_view.pack(fill="both", expand=True)
 
         # ── 分组选择 ──
         group_frame = ctk.CTkFrame(self.phrase_view, fg_color="transparent")
@@ -1175,34 +1163,20 @@ class WXSenderApp:
     def _current_client_name(self) -> str:
         return self.current_client.display_name if self.current_client else "当前接管对象"
 
+    def _toggle_view(self):
+        target = "phrases" if self.mode_var.get() == "ai" else "ai"
+        self._switch_mode(target)
+
     def _switch_mode(self, mode: str):
         self.mode_var.set(mode)
         if mode == "ai":
             self.phrase_view.pack_forget()
             self.ai_view.pack(fill="both", expand=True)
-            self.phrase_mode_btn.configure(
-                fg_color="transparent", border_width=1, border_color=BORDER,
-                text_color=PRIMARY, hover_color=CARD_BG,
-                font=ctk.CTkFont(family="PingFang SC", size=12),
-            )
-            self.ai_mode_btn.configure(
-                fg_color=PRIMARY, border_width=0, text_color="white",
-                hover_color=PRIMARY_H,
-                font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
-            )
+            self.view_toggle_btn.configure(text="话术")
         else:
             self.ai_view.pack_forget()
             self.phrase_view.pack(fill="both", expand=True)
-            self.phrase_mode_btn.configure(
-                fg_color=PRIMARY, border_width=0, text_color="white",
-                hover_color=PRIMARY_H,
-                font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
-            )
-            self.ai_mode_btn.configure(
-                fg_color="transparent", border_width=1, border_color=BORDER,
-                text_color=PRIMARY, hover_color=CARD_BG,
-                font=ctk.CTkFont(family="PingFang SC", size=12),
-            )
+            self.view_toggle_btn.configure(text="草稿台")
 
     def _ai_overflow_menu(self):
         """草稿台底部 ⋯ 溢出菜单：低频项（复制 / 存入知识库 / 清空）。"""
