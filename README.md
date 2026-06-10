@@ -1,4 +1,6 @@
-# IM 快捷发送面板 (macOS)
+# 秒回SideKick (macOS)
+
+> 贴在 IM 窗口侧边的快捷回复助手——客户的消息，永远不等。
 
 macOS 辅助工具，通过 Accessibility API 自动化多款 IM 客户端，提供话术快捷发送、聊天内容读取和 AI 回复生成。**不修改客户端进程，不走网络接口**，纯系统级 API。
 
@@ -79,7 +81,7 @@ uv pip install -r requirements.txt
 ./build.sh
 ```
 
-输出 `dist/wechat-sender.dmg`。安装与 Gatekeeper 说明见 [`docs/install-guide.md`](docs/install-guide.md)。
+输出 `dist/miaohui-sidekick.dmg`。安装与 Gatekeeper 说明见 [`docs/install-guide.md`](docs/install-guide.md)。
 
 ---
 

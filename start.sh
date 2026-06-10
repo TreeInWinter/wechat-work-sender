@@ -1,5 +1,5 @@
 #!/bin/bash
-# 一键启动企业微信快捷发送面板
+# 一键启动 秒回SideKick
 set -e
 
 cd "$(dirname "$0")"
