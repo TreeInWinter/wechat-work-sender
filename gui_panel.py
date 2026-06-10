@@ -1797,6 +1797,7 @@ class WXSenderApp:
     def _ai_read_and_generate(self):
         if self._ai_generating:
             return
+        self._hide_inline_error()
         self.ai_reply_box.delete("1.0", "end")
         self._ai_origin_draft = ""  # 新一轮读取，清空上一轮原稿基准
         self._ai_set_status("正在读取聊天内容...")
@@ -1834,7 +1835,8 @@ class WXSenderApp:
         self.ai_generate_btn.configure(state="normal")
         self._ai_set_context(message)
         self._set_context_summary("读取失败 · 点击查看")
-        self._ai_set_status(message)
+        self._ai_set_status("读取失败")
+        self._show_inline_error(message, retry=self._ai_read_and_generate)
 
     def _ai_regenerate(self):
         if self._ai_generating:
@@ -1882,6 +1884,7 @@ class WXSenderApp:
         box.see("end")
 
     def _ai_generate_async(self, msgs: list):
+        self._hide_inline_error()
         self._ai_generating = True
         self._ai_cancel = CancelToken()
         self._ai_set_generating_ui(True)
@@ -1946,7 +1949,8 @@ class WXSenderApp:
         self._ai_stop_loading_anim()
         self._ai_set_generating_ui(False)
         self._ai_set_refine_enabled(True)
-        self._ai_set_status(message)
+        self._ai_set_status("生成失败")
+        self._show_inline_error(message, retry=self._ai_regenerate)
 
     # ── 草稿改写（对话式微调）─────────────────────────────────
 
@@ -1973,6 +1977,7 @@ class WXSenderApp:
             self._ai_set_status("没有可改写的草稿，请先生成或输入回复")
             return
 
+        self._hide_inline_error()
         self._ai_generating = True
         self.ai_generate_btn.configure(state="disabled")
         self.ai_regenerate_btn.configure(state="disabled")
@@ -2021,12 +2026,13 @@ class WXSenderApp:
         self.ai_generate_btn.configure(state="normal")
         self.ai_regenerate_btn.configure(state="normal")
         self._ai_set_refine_enabled(True)
-        self._ai_set_status(message)
+        self._ai_set_status("改写失败")
+        self._show_inline_error(message)
 
     def _ai_copy_reply(self):
         reply = self._ai_get_reply()
         if not reply:
-            self._show_warning("暂无可复制的回复")
+            self._show_toast("暂无可复制的回复")
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(reply)
@@ -2065,7 +2071,7 @@ class WXSenderApp:
     def _ai_send_reply(self):
         reply = self._ai_get_reply()
         if not reply:
-            self._show_warning("请先生成或输入回复内容")
+            self._show_toast("请先生成或输入回复内容")
             return
         # 数据飞轮：静默沉淀「AI 原稿 → 实际发送」diff（绝不影响发送主流程）
         try:
@@ -2408,11 +2414,19 @@ class WXSenderApp:
 
     def _update_status(self, client, running: bool):
         if not AXIsProcessTrusted():
-            # 权限缺失是异常态（spec v2 状态色：异常=红），非「检测中」
+            # 权限缺失是异常态（spec v2 状态色：异常=红），非「检测中」；
+            # 权限门槛前置到主路径：草稿区内联引导，不藏在折叠菜单里
             self.status_dot.configure(text_color=DOT_ERR)
             self._set_status_text("需要辅助功能权限")
-            # TODO(Task8): 接入内联错误条 _show_inline_error(权限引导)
-        elif client is None:
+            self._show_inline_error("需要辅助功能权限",
+                                    retry=self._show_permission_guide,
+                                    retry_label="去开启")
+            self._perm_error_active = True
+            return
+        if getattr(self, "_perm_error_active", False):
+            self._hide_inline_error()
+            self._perm_error_active = False
+        if client is None:
             self.status_dot.configure(text_color=DOT_ERR)
             self._set_status_text("未选择接管对象")
         elif running and client.capabilities.verified:
@@ -2622,6 +2636,41 @@ class WXSenderApp:
         result = dialog.get_input()
         self.root.attributes("-topmost", True)
         return result
+
+    def _show_inline_error(self, message: str, retry=None, retry_label: str = "重试"):
+        """草稿框上方内联错误条（替代打断式弹窗）。retry 为可选重试回调。"""
+        self._hide_inline_error()
+        bar = ctk.CTkFrame(self.ai_view, corner_radius=8, fg_color="#FDECEC",
+                           border_width=1, border_color="#F5C2C0")
+        ctk.CTkLabel(
+            bar, text=f"✕ {message}", text_color="#C0392B", anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        ).pack(side="left", fill="x", expand=True, padx=(8, 4), pady=3)
+        ctk.CTkButton(
+            bar, text="✕", width=24, height=20, corner_radius=8,
+            fg_color="transparent", text_color="#C0392B", hover_color="#FAD9D7",
+            font=ctk.CTkFont(size=11),
+            command=self._hide_inline_error,
+        ).pack(side="right", padx=(0, 4), pady=3)
+        if retry is not None:
+            ctk.CTkButton(
+                bar, text=retry_label, width=44, height=20, corner_radius=8,
+                fg_color="transparent", border_width=1, border_color="#F5C2C0",
+                text_color="#C0392B", hover_color="#FAD9D7",
+                font=ctk.CTkFont(family="PingFang SC", size=11),
+                command=lambda: (self._hide_inline_error(), retry()),
+            ).pack(side="right", padx=(0, 4), pady=3)
+        bar.pack(fill="x", padx=12, pady=(0, 4), before=self.ai_reply_box)
+        self._inline_error_bar = bar
+
+    def _hide_inline_error(self):
+        bar = getattr(self, "_inline_error_bar", None)
+        if bar is not None:
+            try:
+                bar.destroy()
+            except Exception:
+                pass
+        self._inline_error_bar = None
 
     def _show_toast(self, message: str, duration_ms: int = 1800):
         """轻量浮层提示：主窗底部居中，自动消失，不抢焦点（替代弹窗/状态栏瞬时反馈）。"""
