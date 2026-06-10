@@ -731,6 +731,57 @@ class BlockEditor(ctk.CTkToplevel):
 # 话术卡片组件
 # ============================================================
 
+class DraftHistory:
+    """草稿改写历史栈：refine/重新生成前压栈，支持逐级撤销（Grammarly/Notion 范式）。"""
+
+    MAX_DEPTH = 20
+
+    def __init__(self):
+        self._stack: list[str] = []
+
+    def push(self, draft: str):
+        if not draft:
+            return
+        if self._stack and self._stack[-1] == draft:
+            return
+        self._stack.append(draft)
+        if len(self._stack) > self.MAX_DEPTH:
+            self._stack.pop(0)
+
+    def undo(self) -> str | None:
+        return self._stack.pop() if self._stack else None
+
+    def clear(self):
+        self._stack.clear()
+
+    def __len__(self):
+        return len(self._stack)
+
+
+def make_source_caption(n_messages: int, kb_used: bool) -> str:
+    """AI 草稿来源标注（业内 copilot 实践：来源可追溯 + 人审提示）。"""
+    if n_messages <= 0:
+        return "ⓘ AI 生成 · 发送前请确认"
+    kb_part = " + 知识库" if kb_used else ""
+    return f"ⓘ 据 {n_messages} 条会话{kb_part}生成 · 发送前请确认"
+
+
+def filter_phrases(phrases: dict, current_group: str, query: str) -> list[tuple]:
+    """话术过滤：空查询 → 当前分组全部；非空 → 跨全部分组匹配（搜索优先范式）。
+
+    返回 [(分组名, 组内索引, 话术), ...]，顺序按分组定义序。
+    """
+    query = (query or "").strip().lower()
+    if not query:
+        return [(current_group, i, p) for i, p in enumerate(phrases.get(current_group, []))]
+    out = []
+    for group, items in phrases.items():
+        for i, p in enumerate(items):
+            if query in phrase_preview_text(p).lower():
+                out.append((group, i, p))
+    return out
+
+
 class PhraseCard(ctk.CTkFrame):
     """单条话术卡片：左侧文本 + 右侧发送按钮"""
 
@@ -855,6 +906,7 @@ class WXSenderApp:
         self._toast_after_id = None
         self.mode_var = ctk.StringVar(value="phrases")
         self._ai_messages = []
+        self._draft_history = DraftHistory()
         self._ai_origin_draft = ""   # 本轮 AI 首次生成的原稿，用于发送时对比沉淀 diff
         self._ai_generating = False
         self._ai_kb_capturing = False
@@ -1323,6 +1375,17 @@ class WXSenderApp:
             pad = (0, 3) if col == 0 else (3, 0) if col == 2 else (3, 3)
             btn.grid(row=0, column=col, padx=pad, sticky="ew")
             self.ai_refine_btns.append(btn)
+
+        # 撤销改写（业内范式：AI 改写应可逆）。默认隐藏，有历史时出现；⌘Z 同效。
+        self.ai_undo_btn = ctk.CTkButton(
+            refine_frame, text="撤销", width=44, height=28, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color=BORDER,
+            text_color=TEXT_SUB, hover_color=PILL_HOVER,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            command=self._ai_undo_draft,
+        )
+        self.ai_undo_btn.grid(row=0, column=3, padx=(3, 0))
+        self.ai_undo_btn.grid_remove()
 
         custom_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
         custom_frame.grid_columnconfigure(0, weight=1)
@@ -1844,6 +1907,7 @@ class WXSenderApp:
         if not self._ai_messages:
             self._ai_read_and_generate()
             return
+        self._push_draft_history(self._ai_get_reply())
         self.ai_reply_box.delete("1.0", "end")
         self._ai_generate_async(self._ai_messages)
 
@@ -1996,7 +2060,7 @@ class WXSenderApp:
         def refine_task():
             try:
                 reply = refine_reply(msgs, draft, instruction, ai_config)
-                self.root.after(0, lambda: self._ai_refine_done(reply))
+                self.root.after(0, lambda: self._ai_refine_done(reply, draft))
             except (
                 AICommandNotFoundError,
                 AICommandTimeoutError,
@@ -2011,14 +2075,15 @@ class WXSenderApp:
 
         threading.Thread(target=refine_task, daemon=True).start()
 
-    def _ai_refine_done(self, reply: str):
+    def _ai_refine_done(self, reply: str, draft_before: str = ""):
         self._ai_generating = False
         self._ai_stop_loading_anim()
         self.ai_generate_btn.configure(state="normal")
         self.ai_regenerate_btn.configure(state="normal")
         self._ai_set_refine_enabled(True)
+        self._push_draft_history(draft_before)
         self._ai_set_reply(reply)
-        self._ai_set_status("已改写，可继续微调或发送")
+        self._ai_set_status("已改写，可继续微调或发送（可撤销）")
 
     def _ai_refine_failed(self, message: str):
         self._ai_generating = False
@@ -2038,8 +2103,31 @@ class WXSenderApp:
         self.root.clipboard_append(reply)
         self._show_toast("已复制")
 
+    def _push_draft_history(self, draft: str):
+        """压栈草稿历史并刷新撤销按钮可见性。"""
+        self._draft_history.push(draft)
+        if len(self._draft_history):
+            self.ai_undo_btn.grid()
+
+    def _clear_draft_history(self):
+        self._draft_history.clear()
+        self.ai_undo_btn.grid_remove()
+
+    def _ai_undo_draft(self, *_):
+        prev = self._draft_history.undo()
+        if prev is None:
+            return "break"
+        self._ai_set_reply(prev)
+        self._show_toast("已撤销改写")
+        if len(self._draft_history) == 0:
+            self.ai_undo_btn.grid_remove()
+        return "break"
+
     def _ai_clear_reply(self):
         self._ai_set_reply("")
+        self._clear_draft_history()
+        if hasattr(self, "ai_source_caption"):
+            self.ai_source_caption.configure(text="")
         self._ai_set_status("候选回复已清空")
 
     def _insert_phrase_to_draft(self, phrase):
@@ -2084,6 +2172,9 @@ class WXSenderApp:
         except Exception:
             pass
         self._ai_origin_draft = ""  # 本轮已发送，清空原稿基准，避免下次重复记账
+        self._clear_draft_history()
+        if hasattr(self, "ai_source_caption"):
+            self.ai_source_caption.configure(text="")
         self._do_send(reply)
 
     # ── KB 存储 ──────────────────────────────────────────────────────────────
@@ -2337,6 +2428,8 @@ class WXSenderApp:
         self.root.bind("<Command-Return>", lambda e: self._send_custom())
         self.root.bind("<Command-KP_Enter>", lambda e: self._send_custom())
         self.root.bind("<Escape>", lambda e: self._clear_search())
+        self.root.bind("<Command-z>", self._ai_undo_draft)
+        self.root.bind("<Command-Z>", self._ai_undo_draft)
         for i in range(1, 10):
             self.root.bind(f"<Command-Key-{i}>", lambda e, idx=i: self._send_visible_phrase(idx))
 
