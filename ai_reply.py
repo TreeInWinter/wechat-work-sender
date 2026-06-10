@@ -6,9 +6,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import os
+import select
 import shutil
 import subprocess
 import threading
+import time
 
 try:
     from kb_search import search, update_index
@@ -52,6 +54,28 @@ class AICommandFailedError(AIReplyError):
 
 class AIEmptyResponseError(AIReplyError):
     """AI command returned no usable reply."""
+
+
+class AICancelledError(AIReplyError):
+    """用户主动取消了 AI 生成（流式路径）。"""
+
+
+class CancelToken:
+    """线程安全的取消标志，供流式生成在读取循环中轮询。
+
+    GUI 在后台线程调用 generate_reply_stream，主线程的「取消」按钮调用
+    token.cancel()；流式读取循环每 ~0.2s 轮询一次 cancelled，置位后杀掉子进程。
+    """
+
+    def __init__(self) -> None:
+        self._ev = threading.Event()
+
+    def cancel(self) -> None:
+        self._ev.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._ev.is_set()
 
 
 def resolve_ai_command() -> str:
@@ -235,15 +259,90 @@ def extract_kb_entry(
         return None
 
 
+def _effective_kb_mode(config: AIReplyConfig) -> str:
+    """向后兼容：kb_enabled=True 且 kb_mode 未设置时视为 local。"""
+    mode = config.kb_mode
+    if mode == "none" and config.kb_enabled:
+        mode = "local"
+    return mode
+
+
+def _build_local_reply_cmd(
+    messages: list[dict], config: AIReplyConfig, effective_kb_mode: str
+) -> list[str]:
+    """构建本地知识库 / 无知识库的回复命令（含 vault 校验 + 两级检索）。
+
+    云端分支（kb_mode='cloud'）不走此函数，由 generate_reply 内联处理。
+    抽取为独立函数，让同步 generate_reply 与流式 generate_reply_stream 共用同一
+    命令构建逻辑（单一事实来源）。
+    """
+    if effective_kb_mode == "local":
+        if not config.kb_vault_path:
+            raise AICommandFailedError(
+                "知识库已启用但未配置路径，请在设置中选择 Obsidian vault 文件夹"
+            )
+        if not os.path.isdir(config.kb_vault_path):
+            raise AICommandFailedError(
+                f"知识库路径不存在或不是目录：{config.kb_vault_path}"
+            )
+
+    # ── 两级检索 ──
+    search_results = []
+    use_add_dir = False
+
+    if effective_kb_mode == "local":
+        # 后台异步增量更新索引（不等结果）
+        def _bg_update(path: str) -> None:
+            try:
+                update_index(path)
+            except Exception:
+                pass  # vault 被删除或 db 锁定时静默忽略，下次调用重试
+
+        threading.Thread(target=_bg_update, args=(config.kb_vault_path,), daemon=True).start()
+        # 同步 FTS5 粗筛；任何意外异常均降级为 --add-dir
+        query = _extract_query(messages)
+        try:
+            search_results = search(query, config.kb_vault_path)
+        except Exception:
+            search_results = []
+        if not search_results:
+            use_add_dir = True  # 检索为空或出错，降级
+
+    prompt = build_reply_prompt(
+        messages,
+        max_messages=config.max_messages,
+        kb_enabled=(effective_kb_mode == "local"),
+        search_results=search_results if search_results else None,
+    )
+
+    if effective_kb_mode == "local":
+        if use_add_dir:
+            cmd = [
+                config.command, "--code", "-p",
+                "--add-dir", config.kb_vault_path,
+                "--no-session-persistence",
+                prompt,
+            ]
+        else:
+            cmd = [
+                config.command, "--code", "-p",
+                "--no-session-persistence",
+            ]
+            for r in search_results:
+                cmd += ["--add-file", r.path]
+            cmd.append(prompt)
+    else:
+        cmd = [config.command, *config.args, prompt]
+    return cmd
+
+
 def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) -> str:
     config = config or AIReplyConfig()
     if not any(str(m.get("content", "")).strip() for m in messages):
         raise AIEmptyResponseError("没有可用于生成回复的聊天内容")
 
     # 确定实际 kb_mode（向后兼容：kb_enabled=True 且 kb_mode 未设置时视为 local）
-    effective_kb_mode = config.kb_mode
-    if effective_kb_mode == "none" and config.kb_enabled:
-        effective_kb_mode = "local"
+    effective_kb_mode = _effective_kb_mode(config)
 
     # ── 云端知识库分支（hss-kb contract + mc，本地执行） ──
     if effective_kb_mode == "cloud":
@@ -281,64 +380,8 @@ def generate_reply(messages: list[dict], config: AIReplyConfig | None = None) ->
         return reply
 
     else:
-        # ── 本地知识库 / 不使用知识库 ──
-        if effective_kb_mode == "local":
-            if not config.kb_vault_path:
-                raise AICommandFailedError(
-                    "知识库已启用但未配置路径，请在设置中选择 Obsidian vault 文件夹"
-                )
-            if not os.path.isdir(config.kb_vault_path):
-                raise AICommandFailedError(
-                    f"知识库路径不存在或不是目录：{config.kb_vault_path}"
-                )
-
-        # ── 两级检索 ──
-        search_results = []
-        use_add_dir = False
-
-        if effective_kb_mode == "local":
-            # 后台异步增量更新索引（不等结果）
-            def _bg_update(path: str) -> None:
-                try:
-                    update_index(path)
-                except Exception:
-                    pass  # vault 被删除或 db 锁定时静默忽略，下次调用重试
-
-            threading.Thread(target=_bg_update, args=(config.kb_vault_path,), daemon=True).start()
-            # 同步 FTS5 粗筛；任何意外异常均降级为 --add-dir
-            query = _extract_query(messages)
-            try:
-                search_results = search(query, config.kb_vault_path)
-            except Exception:
-                search_results = []
-            if not search_results:
-                use_add_dir = True  # 检索为空或出错，降级
-
-        prompt = build_reply_prompt(
-            messages,
-            max_messages=config.max_messages,
-            kb_enabled=(effective_kb_mode == "local"),
-            search_results=search_results if search_results else None,
-        )
-
-        if effective_kb_mode == "local":
-            if use_add_dir:
-                cmd = [
-                    config.command, "--code", "-p",
-                    "--add-dir", config.kb_vault_path,
-                    "--no-session-persistence",
-                    prompt,
-                ]
-            else:
-                cmd = [
-                    config.command, "--code", "-p",
-                    "--no-session-persistence",
-                ]
-                for r in search_results:
-                    cmd += ["--add-file", r.path]
-                cmd.append(prompt)
-        else:
-            cmd = [config.command, *config.args, prompt]
+        # ── 本地知识库 / 不使用知识库：复用共享命令构建器 ──
+        cmd = _build_local_reply_cmd(messages, config, effective_kb_mode)
     try:
         result = subprocess.run(
             cmd,
@@ -422,6 +465,119 @@ def _invoke_ai(cmd: list[str], config: AIReplyConfig) -> str:
         visible_cmd = " ".join(cmd[:6])
         raise AIEmptyResponseError(f"AI 命令没有输出，请在终端确认可用：{visible_cmd}")
     return reply
+
+
+def run_ai_stream(
+    cmd: list[str],
+    config: AIReplyConfig,
+    on_chunk,
+    cancel: "CancelToken | None" = None,
+) -> str:
+    """流式运行 AI 命令：用 Popen + select 逐块读取 stdout，回调 on_chunk(chunk_str)，
+    返回完整文本。
+
+    - select 0.2s 轮询：即使子进程长时间无输出，也能及时响应取消 / 超时（不会卡死）。
+    - cancel.cancelled 置位 → 杀子进程并抛 AICancelledError。
+    - 超过 config.timeout → 杀子进程并抛 AICommandTimeoutError。
+
+    注意：是否真正「逐字流式」取决于底层命令（mc）是否增量 flush stdout；
+    即使命令只在结束时整体输出，本函数仍可用（退化为一次性回调）且取消依然有效。
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise AICommandNotFoundError(f"未找到 AI 命令: {config.command}") from exc
+
+    chunks: list[str] = []
+    deadline = time.monotonic() + config.timeout
+
+    def _kill() -> None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    try:
+        stdout = proc.stdout
+        assert stdout is not None
+        fd = stdout.fileno()
+        while True:
+            if cancel is not None and cancel.cancelled:
+                _kill()
+                raise AICancelledError("已取消生成")
+            if time.monotonic() > deadline:
+                _kill()
+                raise AICommandTimeoutError("AI 生成超时，请稍后重试")
+            rlist, _, _ = select.select([fd], [], [], 0.2)
+            if rlist:
+                data = os.read(fd, 4096)
+                if not data:  # EOF
+                    break
+                text = data.decode("utf-8", "replace")
+                chunks.append(text)
+                try:
+                    on_chunk(text)
+                except Exception:
+                    pass  # UI 回调异常不应中断生成
+            elif proc.poll() is not None:
+                # 进程已退出且无更多可读数据
+                break
+    finally:
+        if proc.poll() is None:
+            _kill()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+    if cancel is not None and cancel.cancelled:
+        raise AICancelledError("已取消生成")
+
+    if proc.returncode not in (0, None):
+        err = ""
+        try:
+            err = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()
+        except Exception:
+            err = ""
+        raise AICommandFailedError(err or f"AI 命令退出码: {proc.returncode}")
+
+    reply = "".join(chunks).strip()
+    if not reply:
+        raise AIEmptyResponseError("AI 命令没有输出，请确认命令可用")
+    return reply
+
+
+def generate_reply_stream(
+    messages: list[dict],
+    config: AIReplyConfig | None = None,
+    on_chunk=None,
+    cancel: "CancelToken | None" = None,
+) -> str:
+    """generate_reply 的流式版本：本地/无知识库走真流式；云端知识库不可流式，
+    退化为一次性生成后整体回调。返回完整回复文本。"""
+    config = config or AIReplyConfig()
+    on_chunk = on_chunk or (lambda _t: None)
+
+    if not any(str(m.get("content", "")).strip() for m in messages):
+        raise AIEmptyResponseError("没有可用于生成回复的聊天内容")
+
+    mode = _effective_kb_mode(config)
+    if mode == "cloud":
+        # 云端检索 + 生成是一个不可拆的阻塞调用，无法逐块流式
+        if cancel is not None and cancel.cancelled:
+            raise AICancelledError("已取消生成")
+        reply = generate_reply(messages, config)
+        if cancel is not None and cancel.cancelled:
+            raise AICancelledError("已取消生成")
+        on_chunk(reply)
+        return reply
+
+    cmd = _build_local_reply_cmd(messages, config, mode)
+    return run_ai_stream(cmd, config, on_chunk, cancel)
 
 
 def refine_reply(
