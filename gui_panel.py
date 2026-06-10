@@ -967,7 +967,7 @@ class PhraseCard(ctk.CTkFrame):
 class WXSenderApp:
     def __init__(self):
         self.root = ctk.CTk()
-        self.root.title("企业微信快捷发送")
+        self.root.title("秒回SideKick")
         self.root.configure(fg_color=APP_BG)   # 中性表面背景
         self.root.attributes("-topmost", True)
         # 宽度锁死（保持贴靠对齐），高度允许用户自由拉伸——解决 420×600 固定高度长期紧张。
@@ -3371,7 +3371,7 @@ class WXSenderApp:
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  企业微信快捷发送面板")
+    print("  秒回SideKick — IM 快捷回复助手")
     print("  请确保已授予辅助功能权限")
     print("=" * 50)
     app = WXSenderApp()

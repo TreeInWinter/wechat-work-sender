@@ -33,7 +33,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="企业微信快捷发送",
+    name="秒回SideKick",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -53,12 +53,12 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="企业微信快捷发送",
+    name="秒回SideKick",
 )
 
 app = BUNDLE(
     coll,
-    name="企业微信快捷发送.app",
+    name="秒回SideKick.app",
     icon=None,
     bundle_identifier="com.baijinshan.wechat-work-sender",
     info_plist={

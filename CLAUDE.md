@@ -1,4 +1,4 @@
-# 企业微信快捷发送面板 — CLAUDE.md
+# 秒回SideKick（IM 快捷回复助手）— CLAUDE.md
 
 > 此文件记录关键技术决策与背景，防止上下文压缩后遗失。每次会话结束后更新。
 
@@ -347,7 +347,7 @@ window_follow.py  # 拖拽跟随：NSEvent 全局监听 + 鼠标偏移预测，�
 sender.py         # 核心：send_message/send_image/send_blocks/AX API/read_chat（企业微信）
 phrases.json      # 话术数据（用户数据）
 build.spec        # PyInstaller 打包配置（arm64）
-build.sh          # 一键打包脚本（输出 dist/wechat-sender.dmg ~31MB）
+build.sh          # 一键打包脚本（输出 dist/miaohui-sidekick.dmg ~31MB）
 im_clients/
   base.py           # IMClientAdapter 基类、TakeoverCapabilities、UnsupportedClientAction
   probes.py         # AX depth 魔法数单一事实来源 + 启动自检（run_self_check/run_probe）
@@ -449,5 +449,5 @@ while queue:
 .venv/bin/python tools/explore_ax.py 企业微信 10
 
 # 打包（Apple Silicon .dmg）
-./build.sh   # 输出 dist/wechat-sender.dmg
+./build.sh   # 输出 dist/miaohui-sidekick.dmg
 ```

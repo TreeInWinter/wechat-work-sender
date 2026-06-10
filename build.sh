@@ -30,16 +30,16 @@ rm -rf build dist
 ".venv/bin/python" -m PyInstaller build.spec --noconfirm
 
 mkdir -p dist/dmg-root
-rm -rf "dist/dmg-root/企业微信快捷发送.app"
-cp -R "dist/企业微信快捷发送.app" "dist/dmg-root/"
+rm -rf "dist/dmg-root/秒回SideKick.app"
+cp -R "dist/秒回SideKick.app" "dist/dmg-root/"
 ln -s /Applications "dist/dmg-root/Applications" 2>/dev/null || true
 
-rm -f "dist/wechat-sender.dmg"
+rm -f "dist/miaohui-sidekick.dmg"
 hdiutil create \
-  -volname "企业微信快捷发送" \
+  -volname "秒回SideKick" \
   -srcfolder "dist/dmg-root" \
   -ov \
   -format UDZO \
-  "dist/wechat-sender.dmg"
+  "dist/miaohui-sidekick.dmg"
 
-echo "打包完成：dist/wechat-sender.dmg"
+echo "打包完成：dist/miaohui-sidekick.dmg"

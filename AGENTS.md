@@ -1,4 +1,4 @@
-# 企业微信快捷发送面板 — AGENTS.md
+# 秒回SideKick（IM 快捷回复助手）— AGENTS.md
 
 > 此文件记录关键技术决策与背景，防止上下文压缩后遗失。每次会话结束后更新。
 
@@ -161,7 +161,7 @@ sender.py         # 核心：send_message/send_image/send_blocks/AX API/read_cha
 im_clients/       # 即时通讯客户端适配器（企业微信/微信/大象隔离）
 phrases.json      # 话术数据（用户数据）
 build.spec        # PyInstaller 打包配置（arm64）
-build.sh          # 一键打包脚本（输出 dist/wechat-sender.dmg ~31MB）
+build.sh          # 一键打包脚本（输出 dist/miaohui-sidekick.dmg ~31MB）
 docs/
   design.md           # 技术设计文档
   product.md          # 产品文档
@@ -210,7 +210,7 @@ docs/
    - 主界面发送直接执行，不再弹出发送预览；自定义消息触发发送后清空输入框。
    - 模板变量格式为 `{{变量名}}`；`{{日期}}`、`{{时间}}`、`{{星期}}` 为内置变量，主界面发送时自动替换；未填写的自定义变量保留原占位符。
    - 打包脚本优先使用 `uv pip install`，找不到 `uv` 时降级为 `.venv/bin/python -m pip install`。
-   - `build/` 与 `dist/` 是本地构建产物，已加入 `.gitignore`；验证产物为 `dist/wechat-sender.dmg`。
+   - `build/` 与 `dist/` 是本地构建产物，已加入 `.gitignore`；验证产物为 `dist/miaohui-sidekick.dmg`。
 
 10. **多 IM 接管对象（2026-06-04）**：`codex/im-target-selection` 分支新增 `im_clients/` 适配器层。
    - 注册表只展示有适配器的对象，第一批为企业微信、微信、大象。
@@ -258,5 +258,5 @@ while queue:
 "
 
 # 打包（Apple Silicon .dmg）
-./build.sh   # 输出 dist/wechat-sender.dmg
+./build.sh   # 输出 dist/miaohui-sidekick.dmg
 ```
