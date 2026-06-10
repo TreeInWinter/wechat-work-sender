@@ -266,9 +266,21 @@ PROBES["daxiang"].input.max_depth       # 26（DaxiangAdapter._INPUT_MAX_DEPTH �
 `not_running`。`ElementProbe.root` 标记 BFS 起点是 `app` 还是 `window`（大象输入框从 app 根算，
 消息从 window 根算，两者不同）。
 
-GUI：状态栏 🩺 按钮手动触发全量自检（激活逐个检查，弹窗汇总）；启动后 1.2s 做一次**被动**
-自检（`activate=False`，不抢焦点），只对「与激活无关的确定问题」告警——权限缺失，或微信
-（非 AX）窗口不可达——其余（AX 客户端非前台的 no_window）静默，避免误报。
+GUI：顶栏 `⋯` 菜单「AX 结构自检」手动触发全量自检（激活逐个检查，弹窗汇总）；启动后 1.2s
+做一次**被动**自检（`activate=False`，不抢焦点），只对「与激活无关的确定问题」告警——权限
+缺失，或微信（非 AX）窗口不可达——其余（AX 客户端非前台的 no_window）静默，避免误报。
+
+### 14. UI 反馈体系（2026-06-10 迭代，spec v2 P0/P2 落地）
+
+- **草稿台即主界面**：双模式切换行已删，「话术」入口在顶栏（`view_toggle_btn`）。
+- **状态文字降级**：`status_label` 仍存在但**不进布局**（兼容旧引用），统一走
+  `_set_status_text()`；瞬时结果用 `_show_toast()`，非破坏性错误用
+  `_show_inline_error(message, retry=...)`（草稿框上方红条），破坏性确认仍用弹窗。
+- **改写可撤销**：`DraftHistory`（模块级，有单测）+ `_push_draft_history()`；
+  发送/清空草稿时清栈。
+- **跨分组搜索**：`filter_phrases()`（模块级，有单测）返回 `(分组, 索引, 话术)`；
+  卡片携带 `_group/_group_index`，删除/编辑按归属分组操作。
+- 纯逻辑单测在 `tests/test_gui_panel_ui.py`（stub customtkinter/sender 导入）。
 
 ---
 
