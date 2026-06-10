@@ -1407,9 +1407,16 @@ class WXSenderApp:
         self.ai_refine_btns.append(self.ai_refine_apply_btn)
 
         # ── pack 顺序：底部控件先占位，回复框最后 expand 吸收余量 ──
+        # 来源 caption（spec v2 状态④ + 业内「AI 生成请审核」实践），紧贴草稿框下方
+        self.ai_source_caption = ctk.CTkLabel(
+            self.ai_view, text="", anchor="w", text_color=TEXT_WEAK, height=16,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+        )
+
         send_row.pack(side="bottom", fill="x", padx=12, pady=(2, 10))
         custom_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
         refine_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 4))
+        self.ai_source_caption.pack(side="bottom", fill="x", padx=14, pady=(0, 2))
         self.ai_reply_box.pack(fill="both", expand=True, padx=12, pady=(0, 6))
 
     def _update_kb_row(self):
@@ -1999,6 +2006,12 @@ class WXSenderApp:
         self._ai_set_reply(reply)
         # 记录本轮 AI 原稿（首次生成），发送时与实发文本对比沉淀风格信号
         self._ai_origin_draft = (reply or "").strip()
+        kb_used = self._app_config.get("kb_mode", "none") != "none" or bool(
+            self._app_config.get("kb_enabled")
+        )
+        self.ai_source_caption.configure(
+            text=make_source_caption(len(self._ai_messages), kb_used)
+        )
         self._ai_set_status("AI 回复已生成，可改写或编辑后发送")
 
     def _ai_generation_cancelled(self):
