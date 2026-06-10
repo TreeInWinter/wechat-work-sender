@@ -38,18 +38,22 @@ from im_clients.base import UnsupportedClientAction
 from im_clients.registry import choose_default_client, discover_clients
 from im_clients import probes
 from ai_reply import (
+    AICancelledError,
     AICommandFailedError,
     AICommandNotFoundError,
     AICommandTimeoutError,
     AIEmptyResponseError,
     AIReplyConfig,
+    CancelToken,
     REFINE_PRESETS,
     generate_reply,
+    generate_reply_stream,
     refine_reply,
     extract_kb_entry,
 )
 from kb_writer import KBEntry, save_to_vault
 from config import load_config, save_config
+from draft_log import log_draft_diff
 
 try:
     from kb_search import rebuild_index as _kb_rebuild, get_db_path as _kb_get_db_path
@@ -58,6 +62,60 @@ except ImportError:
     _kb_rebuild = None
     _kb_get_db_path = None
     _sqlite3 = None
+
+
+# ── 系统权限探测 ────────────────────────────────────────────────
+# 本工具依赖两类 macOS 隐私权限：
+#   - 辅助功能（Accessibility）：所有 AX 客户端（企业微信/大象）发送、读取的根本依赖
+#     → AXIsProcessTrusted()（已从 ApplicationServices 导入）
+#   - 屏幕录制（Screen Recording）：微信 Qt 不透 AX，读取走截图 + Vision OCR，必需此权限
+#     → Quartz.CGPreflightScreenCaptureAccess()（macOS 10.15+）
+# 深链直跳系统设置对应面板，避免用户自己翻菜单。
+
+# 系统设置深链（open x-apple.systempreferences:）
+PREF_ACCESSIBILITY = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+PREF_SCREEN_CAPTURE = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+
+try:
+    from Quartz import (
+        CGPreflightScreenCaptureAccess as _cg_preflight_screen,
+        CGRequestScreenCaptureAccess as _cg_request_screen,
+    )
+except Exception:  # pragma: no cover - 旧系统或非 macOS
+    _cg_preflight_screen = None
+    _cg_request_screen = None
+
+
+def has_accessibility_permission() -> bool:
+    """辅助功能权限是否已授予。"""
+    try:
+        return bool(AXIsProcessTrusted())
+    except Exception:
+        return False
+
+
+def has_screen_recording_permission() -> bool:
+    """屏幕录制权限是否已授予。无法探测（旧系统）时乐观返回 True，不挡用户。"""
+    if _cg_preflight_screen is None:
+        return True
+    try:
+        return bool(_cg_preflight_screen())
+    except Exception:
+        return True
+
+
+def request_screen_recording_permission() -> None:
+    """触发系统屏幕录制授权弹窗（首次调用才会弹，已授予则无副作用）。"""
+    if _cg_request_screen is not None:
+        try:
+            _cg_request_screen()
+        except Exception:
+            pass
+
+
+def open_privacy_pane(deeplink: str) -> None:
+    """打开系统设置的指定隐私面板。"""
+    subprocess.run(["open", deeplink], check=False)
 
 
 def _vault_is_indexed(vault_path: str) -> bool:
@@ -80,16 +138,38 @@ def _vault_is_indexed(vault_path: str) -> bool:
     except Exception:
         return False
 
-# 颜色常量
-PRIMARY   = "#1677FF"
-PRIMARY_H = "#0958d9"   # hover
-CARD_BG   = "#e6f0ff"   # 选中卡片背景
-PANEL_BG  = "#f0f5ff"   # 面板背景
-DOT_OK    = "#52c41a"
-DOT_ERR   = "#ff4d4f"
-DOT_WAIT  = "#faad14"
+# ── 配色令牌（轻量中性 + 靛蓝 Indigo）─────────────────────────────
+# 设计方向：去高饱和蓝标题栏，改近白/浅灰表面 + 1px 细边框，强调色只用在
+# 主操作；IM 选择器等控件降为低调中性，标题栏不再与白色控件打架。
 
-ctk.set_appearance_mode("system")   # 跟随 macOS 深色/浅色
+# 强调色 Indigo
+PRIMARY    = "#4F46E5"   # 主按钮 / 选中态 / 链接
+PRIMARY_H  = "#4338CA"   # hover / 按下
+ACCENT_SOFT = "#EEF0FF"  # 极浅 indigo 底（选中卡片 / 浅强调 hover）
+
+# 中性表面 / 边框
+APP_BG     = "#F7F8FA"   # 应用背景
+SURFACE    = "#FFFFFF"   # 卡片 / 输入面
+HEADER_BG  = "#FFFFFF"   # 标题栏（近白，不再用强调色）
+BORDER     = "#E5E7EB"   # 细边框 / 分隔线
+PILL_BG    = "#F0F1F4"   # IM 选择器等胶囊底
+PILL_HOVER = "#E6E8EC"
+
+# 兼容旧引用（全局散落）：选中卡片底 / 面板底
+CARD_BG   = ACCENT_SOFT  # 选中卡片背景（旧名保留）
+PANEL_BG  = "#F7F8FA"    # 面板背景
+
+# 状态色（柔和现代）
+DOT_OK    = "#22C55E"
+DOT_ERR   = "#EF4444"
+DOT_WAIT  = "#F59E0B"
+
+# 文字三级（对齐交互稿 v2 视觉 token）
+TEXT_MAIN = "#1F2329"   # 主文字
+TEXT_SUB  = "#646A73"   # 次文字
+TEXT_WEAK = "#8F959E"   # 弱文字
+
+ctk.set_appearance_mode("light")    # 轻量中性方向：锁定浅色，不跟随系统深色
 ctk.set_default_color_theme("blue")
 
 # ============================================================
@@ -209,6 +289,18 @@ def has_images(phrase) -> bool:
     return any(b.get("type") == "image" for b in normalize_phrase(phrase))
 
 
+def phrase_full_text(phrase) -> str:
+    """返回话术的完整文本（多个文本块按换行拼接，忽略图片块）。
+
+    用于「插入草稿台」：保留原始换行（区别于 phrase_preview_text 的去换行摘要）。
+    """
+    parts = []
+    for block in normalize_phrase(phrase):
+        if block.get("type") == "text" and block.get("content", "").strip():
+            parts.append(block["content"].rstrip())
+    return "\n".join(parts)
+
+
 def extract_variables(blocks: list) -> list[str]:
     """按出现顺序提取 {{变量名}} 占位符，内置日期/时间变量不要求用户填写。"""
     seen = set()
@@ -295,7 +387,7 @@ def make_thumbnail(path: str, size: tuple = (72, 54)):
 class BlockEditor(ctk.CTkToplevel):
     """WYSIWYG 内联画布话术编辑器：文字块直接编辑，图片块显示缩略图。"""
 
-    TEXT_LABEL_BG     = "#e6f0ff"
+    TEXT_LABEL_BG     = ACCENT_SOFT
     IMAGE_LABEL_BG    = "#fff8f0"
     INACTIVE_LABEL_BG = "#f8f8f8"
 
@@ -350,7 +442,7 @@ class BlockEditor(ctk.CTkToplevel):
 
         # 可滚动画布
         self._canvas = ctk.CTkScrollableFrame(
-            self, fg_color="#f5f7ff", corner_radius=0
+            self, fg_color=APP_BG, corner_radius=0
         )
         self._canvas.pack(fill="both", expand=True)
 
@@ -365,7 +457,7 @@ class BlockEditor(ctk.CTkToplevel):
 
         ctk.CTkButton(
             inner, text="＋ 添加文字", height=34, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#bbd6ff",
+            fg_color="transparent", border_width=1, border_color="#D9DCF7",
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(size=11),
             command=self._add_text,
@@ -642,22 +734,28 @@ class PhraseCard(ctk.CTkFrame):
     """单条话术卡片：左侧文本 + 右侧发送按钮"""
 
     NORMAL_BG      = "white"
-    SELECTED_BG    = "#e6f0ff"
-    SELECTED_BORDER = "#bbd6ff"
+    SELECTED_BG    = ACCENT_SOFT
+    SELECTED_BORDER = "#D9DCF7"
 
-    def __init__(self, parent, phrase, on_send, on_select, on_edit=None, index: int | None = None, **kwargs):
+    def __init__(self, parent, phrase, on_send, on_select, on_edit=None, index: int | None = None,
+                 density: str = "comfortable", on_insert=None, **kwargs):
         super().__init__(parent, corner_radius=10, fg_color=self.NORMAL_BG,
                          border_width=1, border_color="#e8e8e8", **kwargs)
         self._phrase = phrase
         self._on_send = on_send
         self._on_select = on_select
         self._on_edit = on_edit
+        self._on_insert = on_insert
         self._index = index
+        self._density = density
         self._selected = False
         self._build()
 
     def _build(self):
         self.grid_columnconfigure(0, weight=1)
+
+        # 密度：紧凑模式缩小卡片内边距，一屏多塞 2-3 条话术
+        pad_y = 4 if self._density == "compact" else 8
 
         preview = phrase_preview_text(self._phrase)
         has_img = has_images(self._phrase)
@@ -671,10 +769,10 @@ class PhraseCard(ctk.CTkFrame):
             text_color="#333",
             font=ctk.CTkFont(family="PingFang SC", size=12),
         )
-        self._label.grid(row=0, column=0, padx=(10, 4), pady=8, sticky="ew")
+        self._label.grid(row=0, column=0, padx=(10, 4), pady=pad_y, sticky="ew")
 
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=0, column=1, padx=(0, 6), pady=8)
+        btn_frame.grid(row=0, column=1, padx=(0, 6), pady=pad_y)
 
         if self._on_edit:
             ctk.CTkButton(
@@ -686,10 +784,20 @@ class PhraseCard(ctk.CTkFrame):
                 command=self._on_edit,
             ).pack(side="top", pady=(0, 3))
 
+        if self._on_insert:
+            ctk.CTkButton(
+                btn_frame, text="插入", width=44, height=22,
+                corner_radius=4, fg_color="transparent",
+                border_width=1, border_color=BORDER,
+                text_color=PRIMARY, hover_color=CARD_BG,
+                font=ctk.CTkFont(size=10),
+                command=self._on_insert,
+            ).pack(side="top", pady=(0, 3))
+
         self._send_btn = ctk.CTkButton(
             btn_frame, text="发送", width=44, height=26,
             corner_radius=6, fg_color=CARD_BG,
-            text_color=PRIMARY, hover_color="#bbd6ff",
+            text_color=PRIMARY, hover_color="#D9DCF7",
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self._on_send,
         )
@@ -719,7 +827,7 @@ class PhraseCard(ctk.CTkFrame):
             self.configure(fg_color=self.NORMAL_BG, border_color="#e8e8e8")
             self._label.configure(text_color="#333")
             self._send_btn.configure(fg_color=CARD_BG, text_color=PRIMARY,
-                                      hover_color="#bbd6ff")
+                                      hover_color="#D9DCF7")
 
 
 # ============================================================
@@ -730,8 +838,12 @@ class WXSenderApp:
     def __init__(self):
         self.root = ctk.CTk()
         self.root.title("企业微信快捷发送")
+        self.root.configure(fg_color=APP_BG)   # 中性表面背景
         self.root.attributes("-topmost", True)
-        self.root.resizable(False, False)
+        # 宽度锁死（保持贴靠对齐），高度允许用户自由拉伸——解决 420×600 固定高度长期紧张。
+        self.root.resizable(False, True)
+        # 吸附开关：True=跟随目标窗口右缘（默认）；False=脱离吸附，可拖到第二屏常驻。
+        self._snap_enabled = True
 
         self.phrases = load_phrases()
         self.current_group = list(self.phrases.keys())[0] if self.phrases else ""
@@ -740,11 +852,13 @@ class WXSenderApp:
         self._search_after_id = None
         self.mode_var = ctk.StringVar(value="phrases")
         self._ai_messages = []
+        self._ai_origin_draft = ""   # 本轮 AI 首次生成的原稿，用于发送时对比沉淀 diff
         self._ai_generating = False
         self._ai_kb_capturing = False
         self._ai_anim_running = False
         self._ai_anim_tick = 0
         self._app_config = load_config()
+        self._density = self._app_config.get("density", "comfortable")  # UI 密度
         self.clients = discover_clients()
         self.current_client = choose_default_client(self.clients)
         self._client_label_to_id = {}
@@ -767,52 +881,68 @@ class WXSenderApp:
         self.root.after(1200, self._startup_self_check)
 
     def _build_ui(self):
-        # ── 状态栏 ──
-        status_frame = ctk.CTkFrame(self.root, height=48, corner_radius=0, fg_color=PRIMARY)
+        # ── 状态栏（近白表面 + 底部 1px 细边框，不再用强调色铺底）──
+        status_frame = ctk.CTkFrame(self.root, height=50, corner_radius=0, fg_color=HEADER_BG)
         status_frame.pack(fill="x")
         status_frame.pack_propagate(False)
 
         left = ctk.CTkFrame(status_frame, fg_color="transparent")
-        left.pack(side="left", padx=12, pady=12)
+        left.pack(side="left", padx=14, pady=12)
 
         self.status_dot = ctk.CTkLabel(left, text="●", text_color=DOT_WAIT,
-                                        font=ctk.CTkFont(size=10), width=14)
+                                        font=ctk.CTkFont(size=11), width=14)
         self.status_dot.pack(side="left")
 
         self.status_label = ctk.CTkLabel(left, text="检测中...",
-                                          text_color="white",
+                                          text_color=TEXT_MAIN,
                                           font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"))
-        self.status_label.pack(side="left", padx=(4, 0))
+        self.status_label.pack(side="left", padx=(5, 0))
 
-        # ── 右侧：折叠菜单（设置/权限/自检/刷新等低频操作收起）+ 接管对象下拉 ──
-        # 「⋯」用原生 tk.Menu 弹出：macOS 原生菜单层级在浮动窗口之上，
-        # 不受主窗口 -topmost（NSFloatingWindowLevel）遮挡，无需临时关 topmost。
+        # ── 右侧：折叠菜单 + 吸附开关 + IM 选择器 ──
+        # 标题栏改近白后，按钮/控件全部降为中性灰，不再白字幽灵。
         self.menu_btn = ctk.CTkButton(
-            status_frame, text="⋯", width=36, height=30,
+            status_frame, text="⋯", width=34, height=30,
             corner_radius=8, fg_color="transparent",
-            hover_color=PRIMARY_H, text_color="white",
+            hover_color=PILL_HOVER, text_color=TEXT_SUB,
             font=ctk.CTkFont(size=20, weight="bold"),
             command=self._show_overflow_menu,
         )
-        self.menu_btn.pack(side="right", padx=(2, 8))
+        self.menu_btn.pack(side="right", padx=(2, 10))
 
+        # 吸附/脱离开关：按钮文字即「下一步动作」——吸附时显示「脱离」，脱离时显示「吸附」
+        self.snap_btn = ctk.CTkButton(
+            status_frame, text="脱离", width=44, height=30,
+            corner_radius=8, fg_color="transparent",
+            hover_color=PILL_HOVER, text_color=TEXT_SUB,
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            command=self._toggle_snap,
+        )
+        self.snap_btn.pack(side="right", padx=(0, 2))
+
+        # IM 选择器：低调浅灰胶囊，融入近白标题栏（不再是白盒压饱和蓝）
         self.target_menu = ctk.CTkOptionMenu(
             status_frame,
             values=["检测中"],
             variable=self.target_var,
-            width=132,
+            width=130,
             height=30,
             corner_radius=8,
-            fg_color="white",
-            button_color=PRIMARY_H,
-            button_hover_color=PRIMARY,
-            text_color="#333",
+            fg_color=PILL_BG,
+            button_color=PILL_BG,
+            button_hover_color=PILL_HOVER,
+            text_color=TEXT_MAIN,
             font=ctk.CTkFont(family="PingFang SC", size=11),
+            dropdown_fg_color=SURFACE,
+            dropdown_text_color=TEXT_MAIN,
+            dropdown_hover_color=ACCENT_SOFT,
             dropdown_font=ctk.CTkFont(family="PingFang SC", size=11),
             command=self._on_target_change,
         )
         self.target_menu.pack(side="right", padx=(0, 4))
         self._refresh_client_menu()
+
+        # 标题栏底部 1px 细分隔线
+        ctk.CTkFrame(self.root, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
 
         # ── 模式切换 ──
         self.mode_frame = ctk.CTkFrame(self.root, fg_color="transparent")
@@ -829,7 +959,7 @@ class WXSenderApp:
 
         self.ai_mode_btn = ctk.CTkButton(
             self.mode_frame, text="AI 助手", height=30, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            fg_color="transparent", border_width=1, border_color=BORDER,
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(family="PingFang SC", size=12),
             command=lambda: self._switch_mode("ai"),
@@ -890,7 +1020,7 @@ class WXSenderApp:
             height=30,
             corner_radius=8,
             border_width=1,
-            border_color="#dce8ff",
+            border_color=BORDER,
             placeholder_text="搜索当前分组话术",
             font=ctk.CTkFont(family="PingFang SC", size=12),
         )
@@ -935,7 +1065,7 @@ class WXSenderApp:
         ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
         # ── 分隔线 ──
-        ctk.CTkFrame(self.phrase_view, height=1, fg_color="#dce8ff", corner_radius=0).pack(
+        ctk.CTkFrame(self.phrase_view, height=1, fg_color=BORDER, corner_radius=0).pack(
             fill="x", padx=12, pady=(2, 8))
 
         # ── 自定义消息 ──
@@ -944,7 +1074,7 @@ class WXSenderApp:
 
         self.custom_input = ctk.CTkTextbox(
             bottom_frame, height=60, corner_radius=10,
-            border_width=1, border_color="#dce8ff",
+            border_width=1, border_color=BORDER,
             font=ctk.CTkFont(family="PingFang SC", size=12),
         )
         self.custom_input.pack(fill="x", pady=(0, 6))
@@ -964,6 +1094,9 @@ class WXSenderApp:
         # ── 初始化 ──
         self._refresh_cards()
         self._check_status()
+        # 草稿台升为默认主界面（spec v2：草稿台即主界面）。
+        # 话术仍可经顶部「话术」切换进入（话术抽屉化为独立任务，暂保留切换入口）。
+        self._switch_mode("ai")
 
     def _refresh_client_menu(self):
         selected_id = self.current_client.client_id if self.current_client else None
@@ -1005,6 +1138,8 @@ class WXSenderApp:
         menu.add_command(label="刷新状态与接管对象", command=self._refresh_targets_and_status)
         menu.add_separator()
         menu.add_command(label="AI / 知识库设置…", command=self._show_ai_settings)
+        density_label = "切换为紧凑布局" if self._density == "comfortable" else "切换为舒适布局"
+        menu.add_command(label=density_label, command=self._toggle_density)
         menu.add_command(label="权限引导…", command=self._show_permission_guide)
         menu.add_command(label="AX 结构自检", command=self._run_self_check_async)
         menu.add_separator()
@@ -1018,6 +1153,16 @@ class WXSenderApp:
             menu.tk_popup(x, y)
         finally:
             menu.grab_release()
+
+    def _toggle_density(self):
+        """在舒适 / 紧凑布局间切换，持久化到 config 并立即重排话术卡片。"""
+        self._density = "compact" if self._density == "comfortable" else "comfortable"
+        self._app_config["density"] = self._density
+        try:
+            save_config(self._app_config)
+        except Exception:
+            pass
+        self._refresh_cards()
 
     def _current_window_bounds(self) -> tuple | None:
         if not self.current_client:
@@ -1033,7 +1178,7 @@ class WXSenderApp:
             self.phrase_view.pack_forget()
             self.ai_view.pack(fill="both", expand=True)
             self.phrase_mode_btn.configure(
-                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                fg_color="transparent", border_width=1, border_color=BORDER,
                 text_color=PRIMARY, hover_color=CARD_BG,
                 font=ctk.CTkFont(family="PingFang SC", size=12),
             )
@@ -1051,10 +1196,28 @@ class WXSenderApp:
                 font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             )
             self.ai_mode_btn.configure(
-                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                fg_color="transparent", border_width=1, border_color=BORDER,
                 text_color=PRIMARY, hover_color=CARD_BG,
                 font=ctk.CTkFont(family="PingFang SC", size=12),
             )
+
+    def _ai_overflow_menu(self):
+        """草稿台底部 ⋯ 溢出菜单：低频项（复制 / 存入知识库 / 清空）。"""
+        has_draft = bool(self.ai_reply_box.get("1.0", "end").strip())
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="复制草稿", command=self._ai_copy_reply,
+                         state=("normal" if has_draft else "disabled"))
+        menu.add_command(label="存入知识库…", command=self._ai_kb_capture_async,
+                         state=("normal" if has_draft else "disabled"))
+        menu.add_separator()
+        menu.add_command(label="清空草稿", command=self._ai_clear_reply,
+                         state=("normal" if has_draft else "disabled"))
+        try:
+            x = self.ai_overflow_btn.winfo_rootx()
+            y = self.ai_overflow_btn.winfo_rooty() + self.ai_overflow_btn.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     def _build_ai_view(self):
         action_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
@@ -1071,7 +1234,7 @@ class WXSenderApp:
 
         self.ai_regenerate_btn = ctk.CTkButton(
             action_frame, text="重新生成", height=34, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            fg_color="transparent", border_width=1, border_color=BORDER,
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(family="PingFang SC", size=12),
             command=self._ai_regenerate,
@@ -1112,7 +1275,7 @@ class WXSenderApp:
 
         self.ai_context_box = ctk.CTkTextbox(
             self.ai_view, height=100, corner_radius=8, border_width=1,
-            border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=11),
+            border_color=BORDER, font=ctk.CTkFont(family="PingFang SC", size=11),
         )
         self.ai_context_box.pack(fill="x", padx=12, pady=(0, 6))
         self.ai_context_box.configure(state="disabled")
@@ -1129,46 +1292,32 @@ class WXSenderApp:
         # 而发送/工具行始终完整可见，无论窗口多矮。
         self.ai_reply_box = ctk.CTkTextbox(
             self.ai_view, height=88, corner_radius=8, border_width=1,
-            border_color="#dce8ff", font=ctk.CTkFont(family="PingFang SC", size=12),
+            border_color=BORDER, font=ctk.CTkFont(family="PingFang SC", size=12),
         )
 
         # ── 发送行（最先 pin 到最底部）──
+        # ── 底部减负：1 主操作（确认发送）+ 1 溢出（⋯）──
+        # 原 4 个按钮（确认发送 / 存知识库 / 复制 / 清空）压成一行：
+        # 主操作 确认发送 撑满，低频项（复制 / 存入知识库 / 清空）收进 ⋯ 菜单。
         send_row = ctk.CTkFrame(self.ai_view, fg_color="transparent")
-        send_row.grid_columnconfigure(0, weight=3)
-        send_row.grid_columnconfigure(1, weight=2)
+        send_row.grid_columnconfigure(0, weight=1)
         ctk.CTkButton(
-            send_row, text="确认发送", height=36, corner_radius=10,
+            send_row, text="确认发送", height=38, corner_radius=10,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
-            font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
+            font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
             command=self._ai_send_reply,
-        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
-        self.ai_save_btn = ctk.CTkButton(
-            send_row, text="💾 存入知识库", height=36, corner_radius=10,
-            fg_color="transparent", border_width=1, border_color="#7c3aed",
-            text_color="#7c3aed", hover_color="#f5f0ff",
-            font=ctk.CTkFont(family="PingFang SC", size=11),
-            state="disabled",
-            command=self._ai_kb_capture_async,
+        ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        self.ai_overflow_btn = ctk.CTkButton(
+            send_row, text="⋯", width=44, height=38, corner_radius=10,
+            fg_color="transparent", border_width=1, border_color=BORDER,
+            text_color=TEXT_SUB, hover_color=CARD_BG,
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=self._ai_overflow_menu,
         )
-        self.ai_save_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+        self.ai_overflow_btn.grid(row=0, column=1, sticky="e")
 
-        # ── 工具行（复制 / 清空）──
-        utility_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
-        utility_frame.grid_columnconfigure((0, 1), weight=1)
-        ctk.CTkButton(
-            utility_frame, text="复制", height=30, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#d9d9d9",
-            text_color="#666", hover_color="#f0f0f0",
-            font=ctk.CTkFont(size=11),
-            command=self._ai_copy_reply,
-        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
-        ctk.CTkButton(
-            utility_frame, text="清空", height=30, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#d9d9d9",
-            text_color="#666", hover_color="#f0f0f0",
-            font=ctk.CTkFont(size=11),
-            command=self._ai_clear_reply,
-        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+        # 兼容：KB 提炼流程仍引用 ai_save_btn 做进度反馈（不进入布局，隐藏存在）
+        self.ai_save_btn = ctk.CTkButton(self.ai_view, text="💾 存入知识库")
 
         # ── 一键改写（对话式微调）：预设 + 自定义 ──
         self.ai_refine_btns: list = []
@@ -1179,7 +1328,7 @@ class WXSenderApp:
         ):
             btn = ctk.CTkButton(
                 refine_frame, text=label, height=28, corner_radius=8,
-                fg_color="transparent", border_width=1, border_color="#dce8ff",
+                fg_color="transparent", border_width=1, border_color=BORDER,
                 text_color=PRIMARY, hover_color=CARD_BG,
                 font=ctk.CTkFont(family="PingFang SC", size=11),
                 command=lambda k=key: self._ai_refine(REFINE_PRESETS[k]),
@@ -1192,14 +1341,14 @@ class WXSenderApp:
         custom_frame.grid_columnconfigure(0, weight=1)
         self.ai_refine_entry = ctk.CTkEntry(
             custom_frame, height=28, corner_radius=8, border_width=1,
-            border_color="#dce8ff", placeholder_text="自定义修改要求，如：加上歉意、更口语化…",
+            border_color=BORDER, placeholder_text="自定义修改要求，如：加上歉意、更口语化…",
             font=ctk.CTkFont(family="PingFang SC", size=11),
         )
         self.ai_refine_entry.grid(row=0, column=0, padx=(0, 4), sticky="ew")
         self.ai_refine_entry.bind("<Return>", lambda e: self._ai_refine_custom())
         self.ai_refine_apply_btn = ctk.CTkButton(
             custom_frame, text="应用", width=52, height=28, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            fg_color="transparent", border_width=1, border_color=BORDER,
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(family="PingFang SC", size=11),
             command=self._ai_refine_custom,
@@ -1209,7 +1358,6 @@ class WXSenderApp:
 
         # ── pack 顺序：底部控件先占位，回复框最后 expand 吸收余量 ──
         send_row.pack(side="bottom", fill="x", padx=12, pady=(2, 10))
-        utility_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 6))
         custom_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
         refine_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 4))
         self.ai_reply_box.pack(fill="both", expand=True, padx=12, pady=(0, 6))
@@ -1225,7 +1373,7 @@ class WXSenderApp:
         if kb_mode == "cloud":
             scope = cfg.get("kb_scope", "")
             scope_str = f" · {scope}" if scope else ""
-            self.kb_row.configure(fg_color="#e6f7ff", border_color="#91d5ff")
+            self.kb_row.configure(fg_color=ACCENT_SOFT, border_color="#91d5ff")
             self.kb_row_label.configure(
                 text=f"☁️ 云端知识库已启用{scope_str}", text_color="#096dd9"
             )
@@ -1321,7 +1469,7 @@ class WXSenderApp:
         path_entry = ctk.CTkEntry(
             row_local, textvariable=path_var,
             height=30, corner_radius=6, border_width=1,
-            border_color="#dce8ff",
+            border_color=BORDER,
             font=ctk.CTkFont(family="PingFang SC", size=11),
             state="disabled",
         )
@@ -1340,7 +1488,7 @@ class WXSenderApp:
 
         ctk.CTkButton(
             row_local, text="浏览…", width=60, height=30, corner_radius=6,
-            fg_color="transparent", border_width=1, border_color="#dce8ff",
+            fg_color="transparent", border_width=1, border_color=BORDER,
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(size=11),
             command=browse,
@@ -1357,7 +1505,7 @@ class WXSenderApp:
         ctk.CTkEntry(
             row_cloud, textvariable=scope_var,
             height=30, corner_radius=6, border_width=1,
-            border_color="#dce8ff",
+            border_color=BORDER,
             placeholder_text="可选：服务名/模块名，提升查询精度",
             font=ctk.CTkFont(family="PingFang SC", size=11),
         ).pack(side="left", fill="x", expand=True, padx=(6, 0))
@@ -1572,14 +1720,14 @@ class WXSenderApp:
         self._ai_anim_tick = 0
         tb = self.ai_reply_box._textbox
         tb.tag_configure("anim_dot",  foreground=PRIMARY)
-        tb.tag_configure("anim_msg",  foreground="#a8bedc")
+        tb.tag_configure("anim_msg",  foreground=TEXT_WEAK)
         tb.tag_configure("anim_cur",  foreground=PRIMARY)
         self._ai_anim_step()
 
     def _ai_stop_loading_anim(self):
         """停止动效，恢复边框颜色，清空占位文字，恢复文本框可编辑。"""
         self._ai_anim_running = False
-        self.ai_reply_box.configure(border_color="#dce8ff")
+        self.ai_reply_box.configure(border_color=BORDER)
         # 恢复底层 tk.Text 为可编辑（_ai_anim_step 最后一次 tick 可能将其设为 disabled）
         self.ai_reply_box._textbox.configure(state="normal")
         self.ai_reply_box.delete("1.0", "end")
@@ -1592,12 +1740,12 @@ class WXSenderApp:
         # 边框呼吸：正弦波，周期 28 tick = 1.4s（50ms/tick）
         t_border = (math.sin(n * math.pi / 14) + 1) / 2
         self.ai_reply_box.configure(
-            border_color=self._lerp_color("#dce8ff", "#1677ff", t_border)
+            border_color=self._lerp_color(BORDER, PRIMARY, t_border)
         )
 
         # 框内占位文字：彩色点 + 提示文字 + 闪烁光标
         t_dot = (math.sin(n * math.pi / 10) + 1) / 2
-        dot_color = self._lerp_color("#a0c4ff", "#1677ff", t_dot)
+        dot_color = self._lerp_color("#a0c4ff", PRIMARY, t_dot)
         cursor_char = "▋" if (n // 9) % 2 == 0 else " "
 
         tb = self.ai_reply_box._textbox
@@ -1646,6 +1794,7 @@ class WXSenderApp:
         if self._ai_generating:
             return
         self.ai_reply_box.delete("1.0", "end")
+        self._ai_origin_draft = ""  # 新一轮读取，清空上一轮原稿基准
         self._ai_set_status("正在读取聊天内容...")
         self.ai_generate_btn.configure(state="disabled")
         client = self.current_client
@@ -1687,12 +1836,51 @@ class WXSenderApp:
         self.ai_reply_box.delete("1.0", "end")
         self._ai_generate_async(self._ai_messages)
 
+    def _ai_set_generating_ui(self, on: bool):
+        """生成中：把「读取并生成」主按钮变为红色「取消生成」；结束后恢复。"""
+        if on:
+            self.ai_generate_btn.configure(
+                text="取消生成", fg_color=DOT_ERR, hover_color="#d9363e",
+                state="normal", command=self._ai_cancel_generation,
+            )
+            self.ai_regenerate_btn.configure(state="disabled")
+        else:
+            self.ai_generate_btn.configure(
+                text="读取并生成", fg_color=PRIMARY, hover_color=PRIMARY_H,
+                state="normal", command=self._ai_read_and_generate,
+            )
+            self.ai_regenerate_btn.configure(state="normal")
+
+    def _ai_cancel_generation(self):
+        """用户点「取消生成」：置位取消标志，流式循环会杀掉子进程。"""
+        token = getattr(self, "_ai_cancel", None)
+        if token is not None:
+            token.cancel()
+        self._ai_set_status("正在取消…")
+
+    def _ai_stream_append(self, text: str):
+        """流式回调：把新到的文本块追加进草稿框并滚动到底。"""
+        if not self._ai_generating:
+            return
+        # 第一个流式块到达：停掉生成动效（它会清空占位文字并恢复可编辑），
+        # 之后才开始真正写入内容。
+        if not getattr(self, "_ai_stream_started", False):
+            self._ai_stop_loading_anim()
+            self._ai_stream_started = True
+        box = self.ai_reply_box
+        box._textbox.configure(state="normal")
+        box.insert("end", text)
+        box.see("end")
+
     def _ai_generate_async(self, msgs: list):
         self._ai_generating = True
-        self.ai_generate_btn.configure(state="disabled")
-        self.ai_regenerate_btn.configure(state="disabled")
+        self._ai_cancel = CancelToken()
+        self._ai_set_generating_ui(True)
         self._ai_set_refine_enabled(False)
-        self._ai_set_status("正在调用 AI 生成回复...")
+        self._ai_set_status("正在调用 AI 生成回复…")
+        # 先放生成动效（呼吸边框 + 「AI 正在生成」占位）；第一个流式块到达时
+        # 再停掉动效、切换为逐块写入。等待期有反馈，有内容了就实时涌出。
+        self._ai_stream_started = False
         self._ai_start_loading_anim()
 
         ai_config = AIReplyConfig(
@@ -1701,11 +1889,17 @@ class WXSenderApp:
             kb_mode=self._app_config.get("kb_mode", "none"),
             kb_scope=self._app_config.get("kb_scope", ""),
         )
+        cancel = self._ai_cancel
+
+        def on_chunk(text: str):
+            self.root.after(0, lambda t=text: self._ai_stream_append(t))
 
         def generate_task():
             try:
-                reply = generate_reply(msgs, ai_config)
+                reply = generate_reply_stream(msgs, ai_config, on_chunk=on_chunk, cancel=cancel)
                 self.root.after(0, lambda: self._ai_generation_done(reply))
+            except AICancelledError:
+                self.root.after(0, self._ai_generation_cancelled)
             except (
                 AICommandNotFoundError,
                 AICommandTimeoutError,
@@ -1723,17 +1917,25 @@ class WXSenderApp:
     def _ai_generation_done(self, reply: str):
         self._ai_generating = False
         self._ai_stop_loading_anim()
-        self.ai_generate_btn.configure(state="normal")
-        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_generating_ui(False)
         self._ai_set_refine_enabled(True)
+        # 用规范化后的完整文本替换流式累积内容（去重 / 启用「存入知识库」）
         self._ai_set_reply(reply)
+        # 记录本轮 AI 原稿（首次生成），发送时与实发文本对比沉淀风格信号
+        self._ai_origin_draft = (reply or "").strip()
         self._ai_set_status("AI 回复已生成，可改写或编辑后发送")
+
+    def _ai_generation_cancelled(self):
+        self._ai_generating = False
+        self._ai_stop_loading_anim()
+        self._ai_set_generating_ui(False)
+        self._ai_set_refine_enabled(True)
+        self._ai_set_status("已取消生成")
 
     def _ai_generation_failed(self, message: str):
         self._ai_generating = False
         self._ai_stop_loading_anim()
-        self.ai_generate_btn.configure(state="normal")
-        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_generating_ui(False)
         self._ai_set_refine_enabled(True)
         self._ai_set_status(message)
 
@@ -1825,11 +2027,48 @@ class WXSenderApp:
         self._ai_set_reply("")
         self._ai_set_status("候选回复已清空")
 
+    def _insert_phrase_to_draft(self, phrase):
+        """把话术文本插入草稿台（切到草稿视图，追加到草稿框末尾，供编辑后发送）。
+
+        spec §4「每卡两动作：插入 / 发送」——插入打通「话术 → 草稿台」动线。
+        图片块不进文本草稿，仅插入文本部分并在状态栏提示。
+        """
+        text = phrase_full_text(phrase)
+        if not text:
+            self._switch_mode("ai")
+            self._ai_set_status("该话术无可插入的文本内容")
+            return
+        self._switch_mode("ai")
+        box = self.ai_reply_box
+        box._textbox.configure(state="normal")
+        existing = box.get("1.0", "end").strip()
+        if existing:
+            box.insert("end", "\n" + text)
+        else:
+            box.delete("1.0", "end")
+            box.insert("end", text)
+        box.see("end")
+        if hasattr(self, "ai_save_btn"):
+            self.ai_save_btn.configure(state="normal")
+        note = "；图片块未插入（草稿台仅支持文本）" if has_images(phrase) else ""
+        self._ai_set_status("已插入话术到草稿台，可编辑后发送" + note)
+
     def _ai_send_reply(self):
         reply = self._ai_get_reply()
         if not reply:
             self._show_warning("请先生成或输入回复内容")
             return
+        # 数据飞轮：静默沉淀「AI 原稿 → 实际发送」diff（绝不影响发送主流程）
+        try:
+            log_draft_diff(
+                self._ai_origin_draft,
+                reply,
+                client_id=(self.current_client.client_id if self.current_client else ""),
+                context_msgs=len(self._ai_messages),
+            )
+        except Exception:
+            pass
+        self._ai_origin_draft = ""  # 本轮已发送，清空原稿基准，避免下次重复记账
         self._do_send(reply)
 
     # ── KB 存储 ──────────────────────────────────────────────────────────────
@@ -1891,7 +2130,7 @@ class WXSenderApp:
         win.attributes("-topmost", True)
 
         # ── Header ──────────────────────────────────────────────────────────
-        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color="#7c3aed")
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
         header.pack(fill="x")
         header.pack_propagate(False)
         ctk.CTkLabel(
@@ -1921,14 +2160,14 @@ class WXSenderApp:
         title_var = ctk.StringVar(value=entry_dict.get("title", ""))
         ctk.CTkEntry(
             body, textvariable=title_var, height=32, corner_radius=6,
-            border_width=1, border_color="#dce8ff", font=ENTRY_FONT,
+            border_width=1, border_color=BORDER, font=ENTRY_FONT,
         ).pack(fill="x", padx=16, pady=(3, 0))
 
         # 适用场景
         labeled_row(body, "适用场景")
         scenario_box = ctk.CTkTextbox(
             body, height=52, corner_radius=6, border_width=1,
-            border_color="#dce8ff", font=ENTRY_FONT,
+            border_color=BORDER, font=ENTRY_FONT,
         )
         scenario_box.pack(fill="x", padx=16, pady=(3, 0))
         scenario_box.insert("end", entry_dict.get("scenario", ""))
@@ -1939,14 +2178,14 @@ class WXSenderApp:
         tags_var = ctk.StringVar(value=tags_raw)
         ctk.CTkEntry(
             body, textvariable=tags_var, height=32, corner_radius=6,
-            border_width=1, border_color="#dce8ff", font=ENTRY_FONT,
+            border_width=1, border_color=BORDER, font=ENTRY_FONT,
         ).pack(fill="x", padx=16, pady=(3, 0))
 
         # 回复内容
         labeled_row(body, "回复内容")
         reply_box = ctk.CTkTextbox(
             body, height=80, corner_radius=6, border_width=1,
-            border_color="#dce8ff", font=ENTRY_FONT,
+            border_color=BORDER, font=ENTRY_FONT,
         )
         reply_box.pack(fill="x", padx=16, pady=(3, 0))
         reply_box.insert("end", reply)
@@ -2017,7 +2256,7 @@ class WXSenderApp:
 
         ctk.CTkButton(
             footer, text="保存到 Vault", height=36, corner_radius=8,
-            fg_color="#7c3aed", hover_color="#6d28d9",
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=on_save,
         ).grid(row=0, column=1, padx=(4, 12), pady=10, sticky="ew")
@@ -2043,6 +2282,7 @@ class WXSenderApp:
             ).pack(pady=24)
             return
 
+        card_gap = (0, 2) if self._density == "compact" else (0, 5)
         for visible_i, (i, phrase) in enumerate(indexed_phrases, 1):
             card = PhraseCard(
                 self.cards_frame,
@@ -2050,9 +2290,11 @@ class WXSenderApp:
                 on_send=lambda p=phrase: self._do_send(p),
                 on_select=self._select_card,
                 on_edit=lambda idx=i: self._edit_phrase(idx),
+                on_insert=lambda p=phrase: self._insert_phrase_to_draft(p),
                 index=visible_i if visible_i <= 9 else None,
+                density=self._density,
             )
-            card.pack(fill="x", pady=(0, 5))
+            card.pack(fill="x", pady=card_gap)
 
     def _select_card(self, card: "PhraseCard"):
         if self._selected_card and self._selected_card != card:
@@ -2092,14 +2334,31 @@ class WXSenderApp:
             self._do_send(self._visible_phrases[idx - 1])
         return "break"
 
+    def _toggle_snap(self):
+        """切换吸附 / 脱离。脱离后面板停在原地、用户可拖到任意屏；重新吸附立即回贴。"""
+        self._snap_enabled = not self._snap_enabled
+        if self._snap_enabled:
+            self.snap_btn.configure(text="脱离")
+            self._last_bounds = None  # 强制下一次轮询立即重新定位
+        else:
+            self.snap_btn.configure(text="吸附")
+
     def _poll_snap(self):
         """
-        每 100ms 读取目标窗口坐标，贴靠到目标窗口右侧。
+        每 100ms 读取目标窗口坐标，贴靠到目标窗口右侧（仅位置，不改高度）。
+
+        - 脱离吸附（_snap_enabled=False）时只重排下一次轮询，不动窗口，
+          让用户能把面板拖到第二屏常驻。
+        - 只更新位置（geometry "+x+y"），不写死高度——保留用户手动拉伸的高度。
 
         过滤策略（防闪烁 + 防消失）：
         - 小变化（< 4px）忽略：防止 IME 弹框引起的 1-2px 抖动触发重绘
         - 大跳变（> 300px）丢弃：AX 数据异常保护，防止面板被送到屏幕外
         """
+        if not self._snap_enabled:
+            self.root.after(100, self._poll_snap)
+            return
+
         bounds = self._current_window_bounds()
         if not bounds:
             self.root.after(100, self._poll_snap)
@@ -2116,10 +2375,10 @@ class WXSenderApp:
                 self.root.after(100, self._poll_snap)
                 return
 
-        # 确认更新
+        # 确认更新：仅贴靠位置到目标窗口右缘，高度由用户掌控
         self._last_bounds = bounds
         wx, wy, ww, wh = bounds
-        self.root.geometry(f"420x{wh}+{wx + ww}+{wy}")
+        self.root.geometry(f"+{wx + ww}+{wy}")
         self.root.after(100, self._poll_snap)
 
     def _check_status(self):
@@ -2153,25 +2412,51 @@ class WXSenderApp:
             self.status_label.configure(text=f"{client.display_name}未安装")
 
     def _open_accessibility_settings(self):
-        subprocess.run(
-            ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
-            check=False,
-        )
+        open_privacy_pane(PREF_ACCESSIBILITY)
+
+    # ── 首启权限向导（实时探测 + 自动前进）──────────────────────────
+    # 单页静态说明 → 活的权限清单：两项权限各一行，实时显示 ✓/待开启，
+    # 「去开启」深链直跳对应系统设置面板；后台 800ms 轮询，授予后自动
+    # 打勾、核心权限齐备后底部按钮转为「开始使用」。
+    #
+    # 权限清单（required=核心，缺失则功能不可用；可选=仅特定客户端需要）：
+    #   - 辅助功能：企业微信/大象 发送+读取的根本依赖（required）
+    #   - 屏幕录制：微信 OCR 读取所需（可选，缺失只影响微信读取）
+
+    def _perm_steps(self):
+        """返回权限清单 [(key, 标题, 一句话原因, 检测函数, 深链, 打开前回调)]。"""
+        return [
+            (
+                "accessibility", "辅助功能", "企业微信 / 大象 发送与读取的根本依赖",
+                has_accessibility_permission, PREF_ACCESSIBILITY, None, True,
+            ),
+            (
+                "screen", "屏幕录制", "微信消息读取（OCR）所需；不用微信可跳过",
+                has_screen_recording_permission, PREF_SCREEN_CAPTURE,
+                request_screen_recording_permission, False,
+            ),
+        ]
 
     def _show_permission_guide(self):
+        # 已有向导则前置，不重复开
+        existing = getattr(self, "_perm_win", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+
         win = ctk.CTkToplevel(self.root)
+        self._perm_win = win
+        win.withdraw()
         win.title("权限引导")
-        win.geometry("520x420")
         win.attributes("-topmost", True)
-        win.grab_set()
 
         header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
         header.pack(fill="x")
         header.pack_propagate(False)
         ctk.CTkLabel(
-            header, text="权限引导", text_color="white",
+            header, text="权限设置", text_color="white",
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
-        ).pack(side="left", padx=12)
+        ).pack(side="left", padx=14)
         ctk.CTkButton(
             header, text="✕", width=32, height=32, corner_radius=8,
             fg_color="transparent", hover_color=PRIMARY_H,
@@ -2179,46 +2464,118 @@ class WXSenderApp:
             command=win.destroy,
         ).pack(side="right", padx=8)
 
-        content = ctk.CTkFrame(win, fg_color="#f5f7ff", corner_radius=0)
+        content = ctk.CTkFrame(win, fg_color=APP_BG, corner_radius=0)
         content.pack(fill="both", expand=True)
 
-        trusted = AXIsProcessTrusted()
-        status_text = "辅助功能权限已授权" if trusted else "尚未检测到辅助功能权限"
-        status_color = DOT_OK if trusted else DOT_WAIT
         ctk.CTkLabel(
-            content, text=status_text, text_color=status_color,
-            font=ctk.CTkFont(family="PingFang SC", size=14, weight="bold"),
-        ).pack(anchor="w", padx=18, pady=(18, 10))
+            content,
+            text="开启以下权限即可使用。授予后会自动打勾，无需重启。",
+            text_color=TEXT_SUB, font=ctk.CTkFont(family="PingFang SC", size=11),
+            wraplength=440, justify="left",
+        ).pack(anchor="w", padx=18, pady=(16, 12))
 
-        guide_text = (
-            "1. 打开 系统设置 → 隐私与安全性 → 辅助功能。\n"
-            "2. 勾选当前运行入口：Terminal、PyCharm/Cursor，或打包后的企业微信快捷发送。\n"
-            "3. 如果已勾选但仍失败，先关闭本工具再重新打开。\n"
-            "4. 发送图片或快捷键粘贴还需要允许系统事件控制。"
-        )
-        guide = ctk.CTkTextbox(
-            content, height=180, corner_radius=8, border_width=1,
-            border_color="#dce8ff",
-            font=ctk.CTkFont(family="PingFang SC", size=12),
-        )
-        guide.pack(fill="x", padx=18, pady=(0, 12))
-        guide.insert("end", guide_text)
-        guide.configure(state="disabled")
+        # 逐项权限卡片，保存可刷新的控件引用
+        self._perm_rows = {}
+        for key, title, why, check, deeplink, on_open, required in self._perm_steps():
+            card = ctk.CTkFrame(content, fg_color="white", corner_radius=10,
+                                border_width=1, border_color="#e5e8ee")
+            card.pack(fill="x", padx=18, pady=(0, 10))
 
-        ctk.CTkButton(
-            content, text="打开辅助功能设置", height=34, corner_radius=8,
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=14, pady=(12, 2))
+
+            dot = ctk.CTkLabel(top, text="○", text_color=DOT_WAIT, width=18,
+                               font=ctk.CTkFont(size=15, weight="bold"))
+            dot.pack(side="left")
+            ctk.CTkLabel(
+                top, text=title + ("" if required else "（可选）"),
+                text_color=TEXT_MAIN,
+                font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
+            ).pack(side="left", padx=(6, 0))
+
+            def _do_open(dl=deeplink, cb=on_open):
+                if cb is not None:
+                    cb()
+                open_privacy_pane(dl)
+
+            btn = ctk.CTkButton(
+                top, text="去开启", width=72, height=28, corner_radius=8,
+                fg_color=PRIMARY, hover_color=PRIMARY_H,
+                font=ctk.CTkFont(family="PingFang SC", size=11, weight="bold"),
+                command=_do_open,
+            )
+            btn.pack(side="right")
+
+            ctk.CTkLabel(
+                card, text=why, text_color=TEXT_SUB, anchor="w",
+                font=ctk.CTkFont(family="PingFang SC", size=11),
+                wraplength=420, justify="left",
+            ).pack(fill="x", padx=(38, 14), pady=(0, 12))
+
+            self._perm_rows[key] = (dot, btn, check)
+
+        # 底部：核心权限齐备前=进度提示，齐备后=开始使用
+        self._perm_footer = ctk.CTkButton(
+            content, text="完成", height=36, corner_radius=8,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
-            command=self._open_accessibility_settings,
-        ).pack(fill="x", padx=18, pady=(0, 8))
+            command=win.destroy,
+        )
+        self._perm_footer.pack(fill="x", padx=18, pady=(4, 16))
 
-        ctk.CTkButton(
-            content, text="重新检测", height=32, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#dce8ff",
-            text_color=PRIMARY, hover_color=CARD_BG,
-            font=ctk.CTkFont(size=11),
-            command=lambda: (win.destroy(), self._check_status(), self._show_permission_guide()),
-        ).pack(fill="x", padx=18)
+        # 关闭时停止轮询
+        def _on_close():
+            pid = getattr(self, "_perm_poll_id", None)
+            if pid is not None:
+                try:
+                    self.root.after_cancel(pid)
+                except Exception:
+                    pass
+                self._perm_poll_id = None
+            self._perm_win = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        self._center_on_root(win, 480, 360)
+        win.grab_set()
+        self._perm_wizard_poll()
+
+    def _perm_wizard_poll(self):
+        """800ms 轮询：实时刷新各权限状态，核心权限齐备后切换底部按钮。"""
+        win = getattr(self, "_perm_win", None)
+        if win is None or not win.winfo_exists():
+            self._perm_poll_id = None
+            return
+
+        accessibility_ok = True
+        for key, (dot, btn, check) in self._perm_rows.items():
+            try:
+                granted = bool(check())
+            except Exception:
+                granted = False
+            if key == "accessibility":
+                accessibility_ok = granted
+            if granted:
+                dot.configure(text="✓", text_color=DOT_OK)
+                btn.configure(text="已开启", state="disabled",
+                              fg_color="transparent", border_width=1,
+                              border_color="#cfd4dc", text_color=TEXT_WEAK)
+            else:
+                dot.configure(text="○", text_color=DOT_WAIT)
+                btn.configure(text="去开启", state="normal",
+                              fg_color=PRIMARY, border_width=0, text_color="white")
+
+        if accessibility_ok:
+            self._perm_footer.configure(text="开始使用 ✓", fg_color=DOT_OK,
+                                        hover_color="#28a745")
+        else:
+            self._perm_footer.configure(text="完成", fg_color=PRIMARY,
+                                        hover_color=PRIMARY_H)
+
+        # 顺带刷新主面板状态点
+        self._check_status()
+        self._perm_poll_id = self.root.after(800, self._perm_wizard_poll)
 
     # ── 辅助：对话框在 topmost 窗口下的兼容方法 ──────────────────
     # macOS 上 CTk -topmost 窗口处于 NSFloatingWindowLevel，
@@ -2450,7 +2807,7 @@ class WXSenderApp:
             command=win.destroy,
         ).pack(side="right", padx=8)
 
-        body = ctk.CTkFrame(win, fg_color="#f5f7ff", corner_radius=0)
+        body = ctk.CTkFrame(win, fg_color=APP_BG, corner_radius=0)
         body.pack(fill="both", expand=True)
 
         entry_vars = {}
@@ -2473,7 +2830,7 @@ class WXSenderApp:
                 entry_vars[name] = sv
                 entry = ctk.CTkEntry(
                     var_frame, textvariable=sv, height=28, corner_radius=7,
-                    border_color="#dce8ff", placeholder_text=f"填写{name}",
+                    border_color=BORDER, placeholder_text=f"填写{name}",
                     font=ctk.CTkFont(family="PingFang SC", size=12),
                 )
                 entry.grid(row=row, column=1, padx=(0, 10), pady=5, sticky="ew")
@@ -2490,7 +2847,7 @@ class WXSenderApp:
 
         preview = ctk.CTkTextbox(
             body, height=230, corner_radius=8, border_width=1,
-            border_color="#dce8ff",
+            border_color=BORDER,
             font=ctk.CTkFont(family="PingFang SC", size=12),
         )
         preview.pack(fill="both", expand=True, padx=12, pady=(0, 10))

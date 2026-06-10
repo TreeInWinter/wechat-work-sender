@@ -24,6 +24,8 @@ _DEFAULTS: dict = {
     # "none"   — 不使用知识库
     "kb_mode": "none",
     "kb_scope": "",     # 云端模式的查询范围（服务名/模块名），可选
+    # UI 密度："comfortable"（默认，间距宽松）| "compact"（紧凑，一屏多塞话术）
+    "density": "comfortable",
 }
 
 
