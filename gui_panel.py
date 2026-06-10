@@ -892,14 +892,19 @@ class WXSenderApp:
         left = ctk.CTkFrame(status_frame, fg_color="transparent")
         left.pack(side="left", padx=14, pady=12)
 
+        # 状态点并入对象选择器（spec v2：● + 选择器，删除常驻状态文字行）。
+        # 点状态点可随时以 toast 查看状态详情。
         self.status_dot = ctk.CTkLabel(left, text="●", text_color=DOT_WAIT,
                                         font=ctk.CTkFont(size=11), width=14)
         self.status_dot.pack(side="left")
+        self._status_text = "检测中..."
+        self.status_dot.bind("<Button-1>",
+                             lambda e: self._show_toast(self._status_text))
 
+        # status_label 保留对象但不进布局（兼容旧引用，状态文字降级为 toast/内联）
         self.status_label = ctk.CTkLabel(left, text="检测中...",
                                           text_color=TEXT_MAIN,
                                           font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"))
-        self.status_label.pack(side="left", padx=(5, 0))
 
         # ── 右侧：折叠菜单 + 吸附开关 + IM 选择器 ──
         # 标题栏改近白后，按钮/控件全部降为中性灰，不再白字幽灵。
@@ -932,9 +937,9 @@ class WXSenderApp:
         )
         self.snap_btn.pack(side="right", padx=(0, 2))
 
-        # IM 选择器：低调浅灰胶囊，融入近白标题栏（不再是白盒压饱和蓝）
+        # IM 选择器：低调浅灰胶囊，紧贴状态点（● + 选择器 = 一体的「对象状态」）
         self.target_menu = ctk.CTkOptionMenu(
-            status_frame,
+            left,
             values=["检测中"],
             variable=self.target_var,
             width=130,
@@ -951,7 +956,7 @@ class WXSenderApp:
             dropdown_font=ctk.CTkFont(family="PingFang SC", size=11),
             command=self._on_target_change,
         )
-        self.target_menu.pack(side="right", padx=(0, 4))
+        self.target_menu.pack(side="left", padx=(6, 0))
         self._refresh_client_menu()
 
         # 标题栏底部 1px 细分隔线
@@ -2360,6 +2365,11 @@ class WXSenderApp:
         self.root.geometry(f"+{wx + ww}+{wy}")
         self.root.after(100, self._poll_snap)
 
+    def _set_status_text(self, text: str):
+        """状态文字统一入口：写入隐藏 label（兼容）+ _status_text（状态点 toast）。"""
+        self._status_text = text
+        self.status_label.configure(text=text)
+
     def _check_status(self):
         """检查当前接管对象状态"""
         client = self.current_client
@@ -2372,23 +2382,25 @@ class WXSenderApp:
 
     def _update_status(self, client, running: bool):
         if not AXIsProcessTrusted():
-            self.status_dot.configure(text_color=DOT_WAIT)
-            self.status_label.configure(text="需要辅助功能权限")
+            # 权限缺失是异常态（spec v2 状态色：异常=红），非「检测中」
+            self.status_dot.configure(text_color=DOT_ERR)
+            self._set_status_text("需要辅助功能权限")
+            # TODO(Task8): 接入内联错误条 _show_inline_error(权限引导)
         elif client is None:
             self.status_dot.configure(text_color=DOT_ERR)
-            self.status_label.configure(text="未选择接管对象")
+            self._set_status_text("未选择接管对象")
         elif running and client.capabilities.verified:
             self.status_dot.configure(text_color=DOT_OK)
-            self.status_label.configure(text=f"{client.display_name}已连接")
+            self._set_status_text(f"{client.display_name}已连接")
         elif running:
             self.status_dot.configure(text_color=DOT_WAIT)
-            self.status_label.configure(text=f"{client.display_name}待验证")
+            self._set_status_text(f"{client.display_name}待验证")
         elif client.installed:
             self.status_dot.configure(text_color=DOT_ERR)
-            self.status_label.configure(text=f"{client.display_name}未运行")
+            self._set_status_text(f"{client.display_name}未运行")
         else:
             self.status_dot.configure(text_color=DOT_ERR)
-            self.status_label.configure(text=f"{client.display_name}未安装")
+            self._set_status_text(f"{client.display_name}未安装")
 
     def _open_accessibility_settings(self):
         open_privacy_pane(PREF_ACCESSIBILITY)
@@ -2717,7 +2729,7 @@ class WXSenderApp:
             probes.STATUS_DEGRADED: "AX 结构异常，请运行自检",
         }.get(result.status, "自检异常")
         try:
-            self.status_label.configure(text=f"{result.display_name}·{hint}")
+            self._set_status_text(f"{result.display_name}·{hint}")
             self.status_dot.configure(text_color=DOT_WAIT)
         except Exception:
             pass
@@ -2946,12 +2958,12 @@ class WXSenderApp:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
-                self.root.after(0, lambda: self.status_label.configure(text="接管能力待验证"))
+                self.root.after(0, lambda: self._set_status_text("接管能力待验证"))
             except NoChatWindowError as e:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
-                self.root.after(0, lambda: self.status_label.configure(text="未选中聊天窗口"))
+                self.root.after(0, lambda: self._set_status_text("未选中聊天窗口"))
             except FileNotFoundError as e:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
