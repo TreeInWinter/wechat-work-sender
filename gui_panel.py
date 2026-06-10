@@ -274,13 +274,13 @@ def normalize_phrase(phrase) -> list:
 
 
 def phrase_preview_text(phrase) -> str:
-    """返回用于卡片展示的纯文本摘要（去换行，图片块替换为 🖼）。"""
+    """返回用于卡片展示的纯文本摘要（去换行，图片块替换为 [图]）。"""
     parts = []
     for block in normalize_phrase(phrase):
         if block.get("type") == "text" and block.get("content", "").strip():
             parts.append(block["content"].replace("\n", " ").strip())
         elif block.get("type") == "image":
-            parts.append("🖼")
+            parts.append("[图]")
     return "  ".join(p for p in parts if p)
 
 
@@ -416,26 +416,27 @@ class BlockEditor(ctk.CTkToplevel):
 
     def _build(self):
         # 标题栏
-        header = ctk.CTkFrame(self, height=44, corner_radius=0, fg_color=PRIMARY)
+        header = ctk.CTkFrame(self, height=44, corner_radius=0, fg_color=HEADER_BG)
         header.pack(fill="x")
         header.pack_propagate(False)
+        ctk.CTkFrame(self, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
 
         ctk.CTkLabel(
-            header, text="编辑话术", text_color="white",
+            header, text="编辑话术", text_color=TEXT_MAIN,
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
         ).pack(side="left", padx=12)
 
         ctk.CTkButton(
-            header, text="确认", width=60, height=28, corner_radius=6,
-            fg_color="white", text_color=PRIMARY, hover_color=CARD_BG,
+            header, text="确认", width=60, height=28, corner_radius=8,
+            fg_color=PRIMARY, text_color="white", hover_color=PRIMARY_H,
             font=ctk.CTkFont(size=12, weight="bold"),
             command=self._confirm,
         ).pack(side="right", padx=(4, 10))
 
         ctk.CTkButton(
-            header, text="取消", width=60, height=28, corner_radius=6,
-            fg_color="transparent", text_color="white", hover_color=PRIMARY_H,
-            border_width=1, border_color="#4a9eff",
+            header, text="取消", width=60, height=28, corner_radius=8,
+            fg_color="transparent", text_color=TEXT_SUB, hover_color=PILL_HOVER,
+            border_width=1, border_color=BORDER,
             font=ctk.CTkFont(size=12),
             command=self.destroy,
         ).pack(side="right")
@@ -542,7 +543,7 @@ class BlockEditor(ctk.CTkToplevel):
             ).pack(side="left", padx=1)
 
         ctk.CTkButton(
-            btn_area, text="🗑", width=20, height=18, corner_radius=4,
+            btn_area, text="✕", width=20, height=18, corner_radius=4,
             fg_color="transparent", text_color="#ff4d4f", hover_color="#fff0f0",
             font=ctk.CTkFont(size=11),
             command=lambda idx=i: self._delete(idx),
@@ -575,7 +576,7 @@ class BlockEditor(ctk.CTkToplevel):
             )
         else:
             ctk.CTkLabel(
-                row, text="🖼", font=ctk.CTkFont(size=24),
+                row, text="图", font=ctk.CTkFont(size=24),
                 width=72, height=54, fg_color="#e0eeff", corner_radius=6,
                 text_color="#7ba8e0",
             ).pack(side="left", padx=(0, 10))
@@ -763,7 +764,7 @@ class PhraseCard(ctk.CTkFrame):
         prefix = f"{self._index}. " if self._index is not None else ""
         self._label = ctk.CTkLabel(
             self,
-            text=prefix + ("🖼 " if has_img else "") + preview,
+            text=prefix + ("[图] " if has_img else "") + preview,
             wraplength=200,
             justify="left", anchor="w",
             text_color="#333",
@@ -1049,7 +1050,7 @@ class WXSenderApp:
         btn_frame.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkButton(
-            btn_frame, text="➕ 添加话术", height=32, corner_radius=8,
+            btn_frame, text="⊕ 添加话术", height=32, corner_radius=8,
             fg_color="transparent", border_width=1, border_color="#d9d9d9",
             text_color="#555", hover_color="#f0f0f0",
             font=ctk.CTkFont(family="PingFang SC", size=11),
@@ -1057,7 +1058,7 @@ class WXSenderApp:
         ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
         ctk.CTkButton(
-            btn_frame, text="🗑️ 删除选中", height=32, corner_radius=8,
+            btn_frame, text="删除选中", height=32, corner_radius=8,
             fg_color="transparent", border_width=1, border_color="#ffe0e0",
             text_color="#ff4d4f", hover_color="#fff0f0",
             font=ctk.CTkFont(family="PingFang SC", size=11),
@@ -1251,7 +1252,7 @@ class WXSenderApp:
         self.kb_row.configure(height=26)
 
         self.kb_row_label = ctk.CTkLabel(
-            self.kb_row, text="📂 知识库未启用 — 点击设置",
+            self.kb_row, text="知识库未启用 · 点击设置",
             text_color="#aaa", anchor="w",
             font=ctk.CTkFont(family="PingFang SC", size=11),
         )
@@ -1317,7 +1318,7 @@ class WXSenderApp:
         self.ai_overflow_btn.grid(row=0, column=1, sticky="e")
 
         # 兼容：KB 提炼流程仍引用 ai_save_btn 做进度反馈（不进入布局，隐藏存在）
-        self.ai_save_btn = ctk.CTkButton(self.ai_view, text="💾 存入知识库")
+        self.ai_save_btn = ctk.CTkButton(self.ai_view, text="存入知识库")
 
         # ── 一键改写（对话式微调）：预设 + 自定义 ──
         self.ai_refine_btns: list = []
@@ -1420,11 +1421,12 @@ class WXSenderApp:
         win.attributes("-topmost", True)
 
         # ── Header ──
-        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=HEADER_BG)
         header.pack(fill="x")
         header.pack_propagate(False)
+        ctk.CTkFrame(win, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
         ctk.CTkLabel(
-            header, text="⚙  AI 知识库设置", text_color="white",
+            header, text="AI 知识库设置", text_color=TEXT_MAIN,
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
         ).pack(side="left", padx=14, pady=12)
 
@@ -1556,7 +1558,7 @@ class WXSenderApp:
                     self._update_kb_row()
                     if err:
                         prog_lbl.configure(
-                            text=f"❌ 重建失败：{err[:50]}", text_color="#cf1322"
+                            text=f"✕ 重建失败：{err[:50]}", text_color="#cf1322"
                         )
                         # 3s 后自动关闭
                         self.root.after(3000, lambda: (
@@ -1687,11 +1689,11 @@ class WXSenderApp:
                     btn_rebuild.configure(text="重建索引")
                     if err:
                         status_lbl.configure(
-                            text=f"❌ 重建失败：{err[:40]}", text_color="#cf1322"
+                            text=f"✕ 重建失败：{err[:40]}", text_color="#cf1322"
                         )
                     else:
                         status_lbl.configure(
-                            text=f"✅ 完成，已索引 {count} 个文件", text_color="#389e0d"
+                            text=f"✓ 完成，已索引 {count} 个文件", text_color="#389e0d"
                         )
                     self._update_kb_row()
 
@@ -2077,7 +2079,7 @@ class WXSenderApp:
         """点击「存入知识库」后：校验配置，启动后台提炼线程。"""
         vault_path = self._app_config.get("kb_vault_path", "")
         if not vault_path:
-            self._show_warning("请先在 ⚙ 设置中配置知识库路径")
+            self._show_warning("请先在设置中配置知识库路径")
             return
 
         reply = self._ai_get_reply()
@@ -2104,7 +2106,7 @@ class WXSenderApp:
     def _ai_kb_capture_done(self, entry_dict: dict | None, reply: str):
         """提炼完成（或失败）后恢复按钮并弹出编辑弹窗。"""
         self._ai_kb_capturing = False
-        self.ai_save_btn.configure(state="normal", text="💾 存入知识库")
+        self.ai_save_btn.configure(state="normal", text="存入知识库")
         source_name = (
             self.current_client.display_name if self.current_client else "未知来源"
         )
@@ -2130,11 +2132,12 @@ class WXSenderApp:
         win.attributes("-topmost", True)
 
         # ── Header ──────────────────────────────────────────────────────────
-        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=HEADER_BG)
         header.pack(fill="x")
         header.pack_propagate(False)
+        ctk.CTkFrame(win, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
         ctk.CTkLabel(
-            header, text="💾  存入知识库", text_color="white",
+            header, text="存入知识库", text_color=TEXT_MAIN,
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
         ).pack(side="left", padx=14, pady=10)
 
@@ -2234,7 +2237,7 @@ class WXSenderApp:
                 filename = os.path.basename(saved_path)
                 win.destroy()
                 self.root.attributes("-topmost", True)
-                self._ai_set_status(f"✅ 已存入知识库：{filename}")
+                self._ai_set_status(f"✓ 已存入知识库：{filename}")
             except OSError as exc:
                 win.grab_release()
                 self._show_warning(f"写入失败：{exc}")
@@ -2450,17 +2453,18 @@ class WXSenderApp:
         win.title("权限引导")
         win.attributes("-topmost", True)
 
-        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=HEADER_BG)
         header.pack(fill="x")
         header.pack_propagate(False)
+        ctk.CTkFrame(win, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
         ctk.CTkLabel(
-            header, text="权限设置", text_color="white",
+            header, text="权限设置", text_color=TEXT_MAIN,
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
         ).pack(side="left", padx=14)
         ctk.CTkButton(
             header, text="✕", width=32, height=32, corner_radius=8,
-            fg_color="transparent", hover_color=PRIMARY_H,
-            text_color="white", font=ctk.CTkFont(size=14),
+            fg_color="transparent", hover_color=PILL_HOVER,
+            text_color=TEXT_SUB, font=ctk.CTkFont(size=14),
             command=win.destroy,
         ).pack(side="right", padx=8)
 
@@ -2647,9 +2651,9 @@ class WXSenderApp:
             return
 
         icon = {
-            probes.STATUS_OK: "✅",
-            probes.STATUS_DEGRADED: "⚠️",
-            probes.STATUS_NO_WINDOW: "⚠️",
+            probes.STATUS_OK: "✓",
+            probes.STATUS_DEGRADED: "△",
+            probes.STATUS_NO_WINDOW: "△",
             probes.STATUS_NO_PERMISSION: "🔒",
             probes.STATUS_NOT_RUNNING: "·",
             probes.STATUS_SKIPPED: "·",
@@ -2676,7 +2680,7 @@ class WXSenderApp:
         这属正常，不告警；只对「与激活无关、确实需要用户处理」的问题提示：
           - 辅助功能权限缺失（no_permission）：持续性问题，必报
           - 非 AX 客户端（微信）窗口不可达（no_window）：CGWindow 不依赖激活，可靠
-        深层 AX 结构异常需激活才能判定，留给手动 🩺 自检。
+        深层 AX 结构异常需激活才能判定，留给手动自检。
         """
         client = self.current_client
         if client is None:
@@ -2702,7 +2706,7 @@ class WXSenderApp:
         hint = {
             probes.STATUS_NO_PERMISSION: "需授予辅助功能权限",
             probes.STATUS_NO_WINDOW: "未检测到窗口",
-            probes.STATUS_DEGRADED: "AX 结构异常，点 🩺 自检",
+            probes.STATUS_DEGRADED: "AX 结构异常，请运行自检",
         }.get(result.status, "自检异常")
         try:
             self.status_label.configure(text=f"{result.display_name}·{hint}")
@@ -2793,17 +2797,18 @@ class WXSenderApp:
         win.attributes("-topmost", True)
         win.grab_set()
 
-        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=PRIMARY)
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=HEADER_BG)
         header.pack(fill="x")
         header.pack_propagate(False)
+        ctk.CTkFrame(win, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
         ctk.CTkLabel(
-            header, text="发送预览", text_color="white",
+            header, text="发送预览", text_color=TEXT_MAIN,
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
         ).pack(side="left", padx=12)
         ctk.CTkButton(
             header, text="✕", width=32, height=32, corner_radius=8,
-            fg_color="transparent", hover_color=PRIMARY_H,
-            text_color="white", font=ctk.CTkFont(size=14),
+            fg_color="transparent", hover_color=PILL_HOVER,
+            text_color=TEXT_SUB, font=ctk.CTkFont(size=14),
             command=win.destroy,
         ).pack(side="right", padx=8)
 
@@ -2928,7 +2933,7 @@ class WXSenderApp:
             try:
                 send_blocks_with_client(client, blocks)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
-                self.root.after(0, lambda: self.status_label.configure(text="✅ 发送成功"))
+                self.root.after(0, lambda: self.status_label.configure(text="发送成功"))
             except UnsupportedClientAction as e:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
@@ -2943,10 +2948,10 @@ class WXSenderApp:
                 msg = str(e)
                 self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
-                self.root.after(0, lambda: self.status_label.configure(text="❌ 图片文件不存在"))
+                self.root.after(0, lambda: self.status_label.configure(text="图片文件不存在"))
             except Exception:
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
-                self.root.after(0, lambda: self.status_label.configure(text="❌ 发送失败"))
+                self.root.after(0, lambda: self.status_label.configure(text="发送失败"))
             self.root.after(3000, self._check_status)
 
         threading.Thread(target=send_task, daemon=True).start()
