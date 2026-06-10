@@ -790,7 +790,8 @@ class PhraseCard(ctk.CTkFrame):
     SELECTED_BORDER = "#C7D7F8"
 
     def __init__(self, parent, phrase, on_send, on_select, on_edit=None, index: int | None = None,
-                 density: str = "comfortable", on_insert=None, **kwargs):
+                 density: str = "comfortable", on_insert=None,
+                 group_label: str | None = None, **kwargs):
         super().__init__(parent, corner_radius=10, fg_color=self.NORMAL_BG,
                          border_width=1, border_color="#e8e8e8", **kwargs)
         self._phrase = phrase
@@ -800,6 +801,7 @@ class PhraseCard(ctk.CTkFrame):
         self._on_insert = on_insert
         self._index = index
         self._density = density
+        self._group_label = group_label
         self._selected = False
         self._build()
 
@@ -813,9 +815,10 @@ class PhraseCard(ctk.CTkFrame):
         has_img = has_images(self._phrase)
 
         prefix = f"{self._index}. " if self._index is not None else ""
+        suffix = f"  〔{self._group_label}〕" if self._group_label else ""
         self._label = ctk.CTkLabel(
             self,
-            text=prefix + ("[图] " if has_img else "") + preview,
+            text=prefix + ("[图] " if has_img else "") + preview + suffix,
             wraplength=200,
             justify="left", anchor="w",
             text_color="#333",
@@ -2385,17 +2388,15 @@ class WXSenderApp:
         for widget in self.cards_frame.winfo_children():
             widget.destroy()
         self._selected_card = None
-        group = self.group_var.get()
-        all_phrases = self.phrases.get(group, [])
-        query = self.search_var.get().strip().lower() if hasattr(self, "search_var") else ""
-        indexed_phrases = [
-            (i, phrase) for i, phrase in enumerate(all_phrases)
-            if not query or query in phrase_preview_text(phrase).lower()
-        ]
-        self._visible_phrases = [phrase for _, phrase in indexed_phrases]
+        current_group = self.group_var.get()
+        query = self.search_var.get() if hasattr(self, "search_var") else ""
+        # 跨分组搜索（Raycast 范式）：搜索非空时检索全部分组，卡片标注来源分组
+        results = filter_phrases(self.phrases, current_group, query)
+        cross_group = bool(query.strip())
+        self._visible_phrases = [p for _, _, p in results]
 
-        if not indexed_phrases:
-            empty_text = "当前分组暂无话术" if not query else "没有匹配的话术"
+        if not results:
+            empty_text = "当前分组暂无话术" if not cross_group else "没有匹配的话术"
             ctk.CTkLabel(
                 self.cards_frame, text=empty_text, text_color="#8c8c8c",
                 font=ctk.CTkFont(family="PingFang SC", size=12),
@@ -2403,17 +2404,19 @@ class WXSenderApp:
             return
 
         card_gap = (0, 2) if self._density == "compact" else (0, 5)
-        for visible_i, (i, phrase) in enumerate(indexed_phrases, 1):
+        for visible_i, (group, i, phrase) in enumerate(results, 1):
             card = PhraseCard(
                 self.cards_frame,
                 phrase=phrase,
                 on_send=lambda p=phrase: self._do_send(p),
                 on_select=self._select_card,
-                on_edit=lambda idx=i: self._edit_phrase(idx),
+                on_edit=lambda idx=i, g=group: self._edit_phrase(idx, g),
                 on_insert=lambda p=phrase: self._insert_phrase_to_draft(p),
                 index=visible_i if visible_i <= 9 else None,
                 density=self._density,
+                group_label=group if cross_group and group != current_group else None,
             )
+            card._group, card._group_index = group, i
             card.pack(fill="x", pady=card_gap)
 
     def _select_card(self, card: "PhraseCard"):
@@ -2943,7 +2946,8 @@ class WXSenderApp:
             self._show_warning("请先选中要删除的话术")
             return
         if self._ask_yesno("确认", "确定要删除这条话术吗？"):
-            group = self.group_var.get()
+            # 跨分组搜索下选中卡片可能不属于当前分组：按卡片记录的归属删除
+            group = getattr(self._selected_card, "_group", None) or self.group_var.get()
             target = self._selected_card.phrase
             phrases_list = self.phrases.get(group, [])
             for i, p in enumerate(phrases_list):
@@ -2953,9 +2957,9 @@ class WXSenderApp:
             save_phrases(self.phrases)
             self._refresh_cards()
 
-    def _edit_phrase(self, idx: int):
-        """打开 BlockEditor 编辑第 idx 条话术并保存。"""
-        group = self.group_var.get()
+    def _edit_phrase(self, idx: int, group: str | None = None):
+        """打开 BlockEditor 编辑指定分组（默认当前分组）第 idx 条话术并保存。"""
+        group = group or self.group_var.get()
         phrases_list = self.phrases.get(group, [])
         if idx >= len(phrases_list):
             return
