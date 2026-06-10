@@ -528,7 +528,7 @@ class BlockEditor(ctk.CTkToplevel):
 
         if i > 0:
             ctk.CTkButton(
-                btn_area, text="↑", width=20, height=18, corner_radius=4,
+                btn_area, text="↑", width=20, height=18, corner_radius=8,
                 fg_color="transparent", text_color="#aaa", hover_color="#f0f0f0",
                 font=ctk.CTkFont(size=11),
                 command=lambda idx=i: self._move(idx, -1),
@@ -536,14 +536,14 @@ class BlockEditor(ctk.CTkToplevel):
 
         if i < len(self.blocks) - 1:
             ctk.CTkButton(
-                btn_area, text="↓", width=20, height=18, corner_radius=4,
+                btn_area, text="↓", width=20, height=18, corner_radius=8,
                 fg_color="transparent", text_color="#aaa", hover_color="#f0f0f0",
                 font=ctk.CTkFont(size=11),
                 command=lambda idx=i: self._move(idx, 1),
             ).pack(side="left", padx=1)
 
         ctk.CTkButton(
-            btn_area, text="✕", width=20, height=18, corner_radius=4,
+            btn_area, text="✕", width=20, height=18, corner_radius=8,
             fg_color="transparent", text_color="#ff4d4f", hover_color="#fff0f0",
             font=ctk.CTkFont(size=11),
             command=lambda idx=i: self._delete(idx),
@@ -577,7 +577,7 @@ class BlockEditor(ctk.CTkToplevel):
         else:
             ctk.CTkLabel(
                 row, text="图", font=ctk.CTkFont(size=24),
-                width=72, height=54, fg_color="#e0eeff", corner_radius=6,
+                width=72, height=54, fg_color="#e0eeff", corner_radius=8,
                 text_color="#7ba8e0",
             ).pack(side="left", padx=(0, 10))
 
@@ -599,15 +599,15 @@ class BlockEditor(ctk.CTkToplevel):
                 size_str = f"{sz // 1024} KB" if sz >= 1024 else f"{sz} B"
                 ctk.CTkLabel(
                     info, text=size_str, anchor="w",
-                    font=ctk.CTkFont(size=10), text_color="#999",
+                    font=ctk.CTkFont(size=11), text_color="#999",
                 ).pack(anchor="w")
             except Exception:
                 pass
 
         ctk.CTkButton(
-            info, text="替换图片", width=60, height=20, corner_radius=4,
+            info, text="替换图片", width=60, height=20, corner_radius=8,
             fg_color="transparent", text_color=PRIMARY, hover_color=CARD_BG,
-            font=ctk.CTkFont(size=10),
+            font=ctk.CTkFont(size=11),
             command=lambda idx=i: self._replace_image(idx),
         ).pack(anchor="w", pady=(4, 0))
 
@@ -778,26 +778,26 @@ class PhraseCard(ctk.CTkFrame):
         if self._on_edit:
             ctk.CTkButton(
                 btn_frame, text="编辑", width=36, height=22,
-                corner_radius=4, fg_color="transparent",
+                corner_radius=8, fg_color="transparent",
                 border_width=1, border_color="#d9d9d9",
                 text_color="#888", hover_color="#f0f0f0",
-                font=ctk.CTkFont(size=10),
+                font=ctk.CTkFont(size=11),
                 command=self._on_edit,
             ).pack(side="top", pady=(0, 3))
 
         if self._on_insert:
             ctk.CTkButton(
                 btn_frame, text="插入", width=44, height=22,
-                corner_radius=4, fg_color="transparent",
+                corner_radius=8, fg_color="transparent",
                 border_width=1, border_color=BORDER,
                 text_color=PRIMARY, hover_color=CARD_BG,
-                font=ctk.CTkFont(size=10),
+                font=ctk.CTkFont(size=11),
                 command=self._on_insert,
             ).pack(side="top", pady=(0, 3))
 
         self._send_btn = ctk.CTkButton(
             btn_frame, text="发送", width=44, height=26,
-            corner_radius=6, fg_color=CARD_BG,
+            corner_radius=8, fg_color=CARD_BG,
             text_color=PRIMARY, hover_color="#C7D7F8",
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self._on_send,
@@ -1244,7 +1244,7 @@ class WXSenderApp:
 
         # ── 知识库状态行 ──
         self.kb_row = ctk.CTkFrame(
-            self.ai_view, corner_radius=6, border_width=1,
+            self.ai_view, corner_radius=8, border_width=1,
             fg_color="#fafafa", border_color="#e8e8e8",
         )
         self.kb_row.pack(fill="x", padx=12, pady=(0, 4))
@@ -1470,7 +1470,7 @@ class WXSenderApp:
         path_var = ctk.StringVar(value=self._app_config.get("kb_vault_path", ""))
         path_entry = ctk.CTkEntry(
             row_local, textvariable=path_var,
-            height=30, corner_radius=6, border_width=1,
+            height=30, corner_radius=10, border_width=1,
             border_color=BORDER,
             font=ctk.CTkFont(family="PingFang SC", size=11),
             state="disabled",
@@ -1489,7 +1489,7 @@ class WXSenderApp:
                 path_var.set(chosen)
 
         ctk.CTkButton(
-            row_local, text="浏览…", width=60, height=30, corner_radius=6,
+            row_local, text="浏览…", width=60, height=30, corner_radius=8,
             fg_color="transparent", border_width=1, border_color=BORDER,
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(size=11),
@@ -1506,7 +1506,7 @@ class WXSenderApp:
         scope_var = ctk.StringVar(value=self._app_config.get("kb_scope", ""))
         ctk.CTkEntry(
             row_cloud, textvariable=scope_var,
-            height=30, corner_radius=6, border_width=1,
+            height=30, corner_radius=10, border_width=1,
             border_color=BORDER,
             placeholder_text="可选：服务名/模块名，提升查询精度",
             font=ctk.CTkFont(family="PingFang SC", size=11),
@@ -2162,14 +2162,14 @@ class WXSenderApp:
         labeled_row(body, "标题")
         title_var = ctk.StringVar(value=entry_dict.get("title", ""))
         ctk.CTkEntry(
-            body, textvariable=title_var, height=32, corner_radius=6,
+            body, textvariable=title_var, height=32, corner_radius=10,
             border_width=1, border_color=BORDER, font=ENTRY_FONT,
         ).pack(fill="x", padx=16, pady=(3, 0))
 
         # 适用场景
         labeled_row(body, "适用场景")
         scenario_box = ctk.CTkTextbox(
-            body, height=52, corner_radius=6, border_width=1,
+            body, height=52, corner_radius=10, border_width=1,
             border_color=BORDER, font=ENTRY_FONT,
         )
         scenario_box.pack(fill="x", padx=16, pady=(3, 0))
@@ -2180,14 +2180,14 @@ class WXSenderApp:
         tags_raw = ", ".join(entry_dict.get("tags", []))
         tags_var = ctk.StringVar(value=tags_raw)
         ctk.CTkEntry(
-            body, textvariable=tags_var, height=32, corner_radius=6,
+            body, textvariable=tags_var, height=32, corner_radius=10,
             border_width=1, border_color=BORDER, font=ENTRY_FONT,
         ).pack(fill="x", padx=16, pady=(3, 0))
 
         # 回复内容
         labeled_row(body, "回复内容")
         reply_box = ctk.CTkTextbox(
-            body, height=80, corner_radius=6, border_width=1,
+            body, height=80, corner_radius=10, border_width=1,
             border_color=BORDER, font=ENTRY_FONT,
         )
         reply_box.pack(fill="x", padx=16, pady=(3, 0))
@@ -2861,7 +2861,7 @@ class WXSenderApp:
             body,
             text="内置变量：{{日期}}、{{时间}}、{{星期}} 会自动替换。",
             text_color="#8c8c8c",
-            font=ctk.CTkFont(family="PingFang SC", size=10),
+            font=ctk.CTkFont(family="PingFang SC", size=11),
         )
         hint.pack(fill="x", padx=12, pady=(0, 8))
 
