@@ -1250,16 +1250,21 @@ class WXSenderApp:
         )
         self.ai_status_label.pack(fill="x", padx=14, pady=(0, 6))
 
-        ctk.CTkLabel(
-            self.ai_view, text="聊天上下文", anchor="w",
-            text_color="#333", font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
-        ).pack(fill="x", padx=14, pady=(4, 4))
+        # 上下文折叠（spec v2）：常驻 100px 文本框 → 单行摘要，点击展开；高度让给草稿框
+        self.ctx_summary_btn = ctk.CTkButton(
+            self.ai_view, text="▸ 尚未读取会话", height=26, corner_radius=8,
+            fg_color="transparent", hover_color=PILL_HOVER,
+            text_color=TEXT_SUB, anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=11),
+            command=self._toggle_context,
+        )
+        self.ctx_summary_btn.pack(fill="x", padx=12, pady=(0, 2))
+        self._ctx_expanded = False
 
         self.ai_context_box = ctk.CTkTextbox(
-            self.ai_view, height=100, corner_radius=8, border_width=1,
+            self.ai_view, height=120, corner_radius=8, border_width=1,
             border_color=BORDER, font=ctk.CTkFont(family="PingFang SC", size=11),
         )
-        self.ai_context_box.pack(fill="x", padx=12, pady=(0, 6))
         self.ai_context_box.configure(state="disabled")
 
         ctk.CTkLabel(
@@ -1748,6 +1753,22 @@ class WXSenderApp:
     def _ai_set_status(self, text: str):
         self.ai_status_label.configure(text=text)
 
+    def _toggle_context(self):
+        """展开 / 收起聊天上下文（默认收起为单行摘要）。"""
+        self._ctx_expanded = not self._ctx_expanded
+        summary = self.ctx_summary_btn.cget("text").lstrip("▸▾ ")
+        if self._ctx_expanded:
+            self.ai_context_box.pack(fill="x", padx=12, pady=(0, 6),
+                                     after=self.ctx_summary_btn)
+            self.ctx_summary_btn.configure(text=f"▾ {summary}")
+        else:
+            self.ai_context_box.pack_forget()
+            self.ctx_summary_btn.configure(text=f"▸ {summary}")
+
+    def _set_context_summary(self, summary: str):
+        arrow = "▾" if self._ctx_expanded else "▸"
+        self.ctx_summary_btn.configure(text=f"{arrow} {summary}")
+
     def _ai_set_context(self, text: str):
         self.ai_context_box.configure(state="normal")
         self.ai_context_box.delete("1.0", "end")
@@ -1800,14 +1821,19 @@ class WXSenderApp:
         self.ai_generate_btn.configure(state="normal")
         if not msgs:
             self._ai_set_context(f"未读取到消息，请先在{self._current_client_name()}中选中聊天窗口。")
+            self._set_context_summary("未读取到消息 · 点击查看")
             self._ai_set_status("未读取到聊天内容")
             return
         self._ai_set_context(self._format_ai_messages(msgs))
+        self._set_context_summary(
+            f"已读取 {len(msgs)} 条 · {datetime.now().strftime('%H:%M')}"
+        )
         self._ai_generate_async(msgs)
 
     def _ai_read_failed(self, message: str):
         self.ai_generate_btn.configure(state="normal")
         self._ai_set_context(message)
+        self._set_context_summary("读取失败 · 点击查看")
         self._ai_set_status(message)
 
     def _ai_regenerate(self):
