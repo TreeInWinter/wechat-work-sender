@@ -131,9 +131,64 @@ first = False
 
 ---
 
-### 8. 窗口位置轮询在主线程，100ms 间隔
+### 8. 窗口贴合 = 拖拽事件驱动（丝滑）+ 100ms 轮询（兜底）
 
-AX API 每次调用 < 5ms，直接在主线程 `root.after(100, _poll_snap)` 即可，不需要后台线程。
+**拖拽跟随（`window_follow.py`，2026-06-10）**：100ms 轮询有半帧到一帧拖影，
+做不到原生丝滑。拖动期间完全不查 AX：
+
+- `NSEvent.addGlobalMonitorForEventsMatchingMask_handler_` 监听全局
+  leftMouseDown/Dragged/Up（辅助功能权限即可，Tk Aqua 跑在 Cocoa 运行循环上，
+  handler 在主线程回调，真机验证通过）；
+- mouseDown 落在目标窗口顶部 80px 拖拽带内且 `owner_at_point`（CGWindowList
+  前→后第一个 layer-0 窗口，无需屏幕录制权限）确认是目标 app → 记录
+  「鼠标-窗口」偏移开启会话；
+- 每个 dragged 事件：预测位置 = 鼠标 + 偏移（零 AX 调用，60-120Hz），handler
+  **只把预测位置存进 `_pending_drag_pos`**（传感器角色，不执行任何动作）；
+- `_poll_snap` 检测到拖拽会话后自动切 **8ms 高频泵**（~120Hz），在 Tk 回调
+  上下文里消费最新位置，用 `root.geometry()` 移动面板——geometry 的移动在泵
+  返回主循环后的 idle 阶段立即生效，亚毫秒级，不是丝滑瓶颈；
+- mouseUp：handler 置 `_drag_end_pending`，泵执行 `_snap_now()` 做一次 AX
+  真值校正（屏幕边缘吸附会让预测偏离实际），然后退回 100ms 慢轮询。
+
+**⚠️ GIL 致命坑（踩过两次，机制要记牢）**：`_tkinter` 的线程状态是配对管理
+的——只有经 `_tkinter` 进入 Tcl（`ENTER_TCL` 把线程状态存进 `tcl_tstate`），
+Tcl 回调 Python 时（`ENTER_PYTHON` = `PyEval_RestoreThread(tcl_tstate)`）才
+合法。由此两条铁律：
+
+1. **NSEvent handler 里不能调 Tk**（root.after/geometry 都不行）：handler
+   发生在 Tcl_DoOneEvent 泵 Cocoa 事件途中（Tcl 已释放 GIL，PyObjC 经
+   PyGILState 临时拿回），重入 _tkinter 会破坏 tcl_tstate 配对。
+2. **任何上下文都不能用 PyObjC `setFrameOrigin_` 移动 Tk 自己的 NSWindow**
+   （第二次崩溃就是把它挪进 Tk after 回调后仍然崩）：PyObjC 释放 GIL 时不设
+   `tcl_tstate`，窗口移动同步触发 TkMacOSX `windowDidMove` → CTk 的
+   `<Configure>` 回调 → `ENTER_PYTHON` 拿到 NULL 线程状态 → fatal。
+   面板移动**只能走 `root.geometry()`**。
+
+AX 读取、CGWindowList、`NSEvent.mouseLocation` 等只读、不碰 Tk 的 PyObjC
+调用在 handler 里已验证安全。回调 handler-safe 性由
+`tests/test_gui_panel_ui.py::DragFollowCallbackTests` 守护。
+
+**坐标系**：全程 AX 顶左坐标，只在 `setFrameOrigin_` 瞬间经
+`appkit_frame_origin()` 翻转 y（AppKit 底左原点）。纯逻辑
+（DragSession/in_drag_band/appkit_frame_origin）无 AppKit 依赖，单测在
+`tests/test_window_follow.py`。
+
+**轮询兜底**：`_poll_snap` 100ms 保留，覆盖非拖拽位移（最大化、AppleScript
+移窗等）；拖拽会话进行中暂停轮询防两路打架。监听安装失败时静默回退纯轮询。
+AX API 每次调用 < 5ms，主线程 `root.after(100, _poll_snap)`，不需要后台线程。
+
+**自愈式贴靠 + `SnapFilter` 读数把关**（gui_panel 模块级纯逻辑，有单测）：
+- **每 tick 对比「期望位置（目标右缘）vs 面板实际位置（parse_geometry_pos
+  解析 root.geometry()）」，偏离 ≥4px 才移动**。不能只跟踪目标窗口变化来决定
+  动不动（已踩坑）：面板最小化期间目标移动，filter 接受了新位置，面板恢复后
+  delta=0 永远跳过、从此不跟。自愈对比让面板任何形式的失同步（最小化恢复被
+  macOS 放回旧位、被用户误拖）都在下一 tick 归位，顺带防 IME 抖动；
+- `SnapFilter.validate()` 只管读数可信性：大跳变（>300px）**不永久丢弃**——
+  旧实现丢弃时不更新基准导致每 tick 同样大 delta、永远拒绝（已踩坑），现为
+  连续 2 tick 一致 → 可信真实位移；单 tick AX 毛刺仍被拒；目标窗口消失
+  （最小化/退出，bounds=None）→ 重现的首个读数无条件可信；
+- 面板自身最小化（`root.state() != "normal"`）时不调 geometry（iconic 下行为
+  未定义），恢复可见后靠自愈对比自动归位。
 
 ---
 
@@ -288,6 +343,7 @@ GUI：顶栏 `⋯` 菜单「AX 结构自检」手动触发全量自检（激活�
 
 ```
 gui_panel.py      # CustomTkinter GUI（BlockEditor、PhraseCard、发送逻辑）
+window_follow.py  # 拖拽跟随：NSEvent 全局监听 + 鼠标偏移预测，面板丝滑贴合（见第 8 条）
 sender.py         # 核心：send_message/send_image/send_blocks/AX API/read_chat（企业微信）
 phrases.json      # 话术数据（用户数据）
 build.spec        # PyInstaller 打包配置（arm64）
