@@ -142,10 +142,10 @@ def _vault_is_indexed(vault_path: str) -> bool:
 # 设计方向：去高饱和蓝标题栏，改近白/浅灰表面 + 1px 细边框，强调色只用在
 # 主操作；IM 选择器等控件降为低调中性，标题栏不再与白色控件打架。
 
-# 强调色 Indigo
-PRIMARY    = "#4F46E5"   # 主按钮 / 选中态 / 链接
-PRIMARY_H  = "#4338CA"   # hover / 按下
-ACCENT_SOFT = "#EEF0FF"  # 极浅 indigo 底（选中卡片 / 浅强调 hover）
+# 强调色（收敛蓝，对齐交互稿 v2 视觉 token）
+PRIMARY    = "#2B5CE6"   # 主按钮 / 选中态 / 链接
+PRIMARY_H  = "#1E47C0"   # hover / 按下
+ACCENT_SOFT = "#EAF0FD"  # 极浅蓝底（选中卡片 / 浅强调 hover）
 
 # 中性表面 / 边框
 APP_BG     = "#F7F8FA"   # 应用背景
@@ -159,10 +159,10 @@ PILL_HOVER = "#E6E8EC"
 CARD_BG   = ACCENT_SOFT  # 选中卡片背景（旧名保留）
 PANEL_BG  = "#F7F8FA"    # 面板背景
 
-# 状态色（柔和现代）
-DOT_OK    = "#22C55E"
-DOT_ERR   = "#EF4444"
-DOT_WAIT  = "#F59E0B"
+# 状态色（spec v2：检测中=中性灰，不是警告）
+DOT_OK    = "#34C759"
+DOT_ERR   = "#FF3B30"
+DOT_WAIT  = "#8F959E"
 
 # 文字三级（对齐交互稿 v2 视觉 token）
 TEXT_MAIN = "#1F2329"   # 主文字
@@ -457,7 +457,7 @@ class BlockEditor(ctk.CTkToplevel):
 
         ctk.CTkButton(
             inner, text="＋ 添加文字", height=34, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color="#D9DCF7",
+            fg_color="transparent", border_width=1, border_color="#C7D7F8",
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(size=11),
             command=self._add_text,
@@ -735,7 +735,7 @@ class PhraseCard(ctk.CTkFrame):
 
     NORMAL_BG      = "white"
     SELECTED_BG    = ACCENT_SOFT
-    SELECTED_BORDER = "#D9DCF7"
+    SELECTED_BORDER = "#C7D7F8"
 
     def __init__(self, parent, phrase, on_send, on_select, on_edit=None, index: int | None = None,
                  density: str = "comfortable", on_insert=None, **kwargs):
@@ -797,7 +797,7 @@ class PhraseCard(ctk.CTkFrame):
         self._send_btn = ctk.CTkButton(
             btn_frame, text="发送", width=44, height=26,
             corner_radius=6, fg_color=CARD_BG,
-            text_color=PRIMARY, hover_color="#D9DCF7",
+            text_color=PRIMARY, hover_color="#C7D7F8",
             font=ctk.CTkFont(size=11, weight="bold"),
             command=self._on_send,
         )
@@ -827,7 +827,7 @@ class PhraseCard(ctk.CTkFrame):
             self.configure(fg_color=self.NORMAL_BG, border_color="#e8e8e8")
             self._label.configure(text_color="#333")
             self._send_btn.configure(fg_color=CARD_BG, text_color=PRIMARY,
-                                      hover_color="#D9DCF7")
+                                      hover_color="#C7D7F8")
 
 
 # ============================================================
@@ -1373,9 +1373,9 @@ class WXSenderApp:
         if kb_mode == "cloud":
             scope = cfg.get("kb_scope", "")
             scope_str = f" · {scope}" if scope else ""
-            self.kb_row.configure(fg_color=ACCENT_SOFT, border_color="#91d5ff")
+            self.kb_row.configure(fg_color=SURFACE, border_color=BORDER)
             self.kb_row_label.configure(
-                text=f"☁️ 云端知识库已启用{scope_str}", text_color="#096dd9"
+                text=f"✓ 云端知识库已启用{scope_str}", text_color=PRIMARY
             )
         elif kb_mode == "local" and cfg.get("kb_vault_path"):
             vault_name = os.path.basename(cfg["kb_vault_path"]) or cfg["kb_vault_path"]
@@ -1396,14 +1396,14 @@ class WXSenderApp:
                             conn.close()
                 except Exception:
                     pass
-            self.kb_row.configure(fg_color="#f6ffed", border_color="#b7eb8f")
+            self.kb_row.configure(fg_color=SURFACE, border_color=BORDER)
             self.kb_row_label.configure(
-                text=f"📗 知识库已启用 · {vault_name}{count_str}", text_color="#389e0d"
+                text=f"✓ 知识库已启用 · {vault_name}{count_str}", text_color="#389e0d"
             )
         else:
-            self.kb_row.configure(fg_color="#fafafa", border_color="#e8e8e8")
+            self.kb_row.configure(fg_color=SURFACE, border_color=BORDER)
             self.kb_row_label.configure(
-                text="📂 知识库未启用 — 点击设置", text_color="#aaa"
+                text="知识库未启用 · 点击设置", text_color=TEXT_WEAK
             )
 
     def _show_ai_settings(self):
