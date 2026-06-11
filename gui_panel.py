@@ -1089,9 +1089,10 @@ class WXSenderApp:
         )
         self.view_toggle_btn.pack(side="right", padx=(0, 2))
 
-        # 吸附/脱离开关：按钮文字即「当前状态」——吸附时显示「⊙ 跟随」，脱离时显示「○ 固定」
+        # 吸附/脱离开关：按钮文字描述「点击后发生的事」（macOS HIG）
+        # 跟随状态 → 显示「固定」（点击将固定）；固定状态 → 显示「跟随」（点击将恢复跟随）
         self.snap_btn = ctk.CTkButton(
-            status_frame, text="⊙ 跟随", width=52, height=30,
+            status_frame, text="○ 固定", width=52, height=30,
             corner_radius=8, fg_color="transparent",
             hover_color=PILL_HOVER, text_color=TEXT_SUB,
             font=ctk.CTkFont(family="PingFang SC", size=11),
@@ -1287,12 +1288,14 @@ class WXSenderApp:
         # 切换客户端时清空 AI 上下文，避免将 A 客户端的草稿/上下文误发给 B
         if hasattr(self, "ai_reply_box"):
             self.ai_reply_box.delete("1.0", "end")
+            self._on_draft_modified()
         self._ai_messages = []
         self._clear_draft_history()
         if hasattr(self, "ai_regenerate_btn"):
             self.ai_regenerate_btn.configure(state="disabled")
         if hasattr(self, "ctx_summary_btn"):
             self._set_context_summary("已切换客户端，请重新读取")
+        self._ai_set_status("① 在 IM 窗口打开一个聊天  ② 点「读取并生成」")
         if hasattr(self, "ai_context_box"):
             self._ai_set_context("")
         self._check_status()
@@ -1310,7 +1313,7 @@ class WXSenderApp:
         density_label = "切换为紧凑布局" if self._density == "comfortable" else "切换为舒适布局"
         menu.add_command(label=density_label, command=self._toggle_density)
         menu.add_command(label="权限引导…", command=self._show_permission_guide)
-        menu.add_command(label="AX 结构自检", command=self._run_self_check_async)
+        menu.add_command(label="诊断连接…", command=self._run_self_check_async)
         menu.add_separator()
         menu.add_command(
             label="快捷键：⌘F 搜索 · ⌘↩ 发送自定义 · ⌘1-9 发送话术 · Esc 清空",
@@ -1402,7 +1405,7 @@ class WXSenderApp:
             self.ai_view, corner_radius=8, border_width=1,
             fg_color="#fafafa", border_color="#e8e8e8",
         )
-        self.kb_row.pack(fill="x", padx=12, pady=(0, 4))
+        # 不在初始化时 pack，由 _update_kb_row 统一决定是否显示，避免 pack→pack_forget 单帧闪烁
         self.kb_row.pack_propagate(False)
         self.kb_row.configure(height=26)
 
@@ -1459,7 +1462,7 @@ class WXSenderApp:
             send_row, text="发送", height=38, corner_radius=10,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
-            command=self._ai_send_reply,
+            command=self._ai_send_reply, state="disabled",
         )
         self.ai_send_btn.grid(row=0, column=0, padx=(0, 6), sticky="ew")
         self.ai_overflow_btn = ctk.CTkButton(
@@ -1551,10 +1554,17 @@ class WXSenderApp:
         has_content = bool(self.ai_reply_box.get("1.0", "end").strip())
         refine_mapped = self._refine_frame.winfo_ismapped()
 
+        # 发送按钮与草稿内容同步（Luke Wroblewski：空草稿时按钮应 disabled，不能只靠 toast）
+        if hasattr(self, "ai_send_btn"):
+            self.ai_send_btn.configure(state="normal" if has_content else "disabled")
+
         if has_content and not refine_mapped:
             # 按 side="bottom" 顺序重新 pack：custom 先（靠近发送行），refine 后（靠近草稿框）
             self._custom_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
             self._refine_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 4))
+            # grid_remove 保留 grid 配置，re-pack refine_frame 时撤销按钮状态需同步
+            if hasattr(self, "ai_undo_btn") and len(self._draft_history) == 0:
+                self.ai_undo_btn.grid_remove()
         elif not has_content and refine_mapped:
             self._refine_frame.pack_forget()
             self._custom_frame.pack_forget()
@@ -2109,7 +2119,9 @@ class WXSenderApp:
                 text="读取并生成", fg_color=PRIMARY, hover_color=PRIMARY_H,
                 state="normal", command=self._ai_read_and_generate,
             )
-            self.ai_regenerate_btn.configure(state="normal")
+            # 只有读取到消息后才能重新生成（Norman：可见的按钮应指向真实可执行的操作）
+            regen_state = "normal" if getattr(self, "_ai_messages", []) else "disabled"
+            self.ai_regenerate_btn.configure(state=regen_state)
 
     def _ai_cancel_generation(self):
         """用户点「取消生成」：置位取消标志，流式循环会杀掉子进程。"""
@@ -2138,7 +2150,7 @@ class WXSenderApp:
         self._ai_cancel = CancelToken()
         self._ai_set_generating_ui(True)
         self._ai_set_refine_enabled(False)
-        self._ai_set_status("正在调用 AI 生成回复…")
+        self._ai_set_status("正在生成回复…")
         # 先放生成动效（呼吸边框 + 「AI 正在生成」占位）；第一个流式块到达时
         # 再停掉动效、切换为逐块写入。等待期有反馈，有内容了就实时涌出。
         self._ai_stream_started = False
@@ -2191,7 +2203,7 @@ class WXSenderApp:
         self.ai_source_caption.configure(
             text=make_source_caption(len(self._ai_messages), kb_used)
         )
-        self._ai_set_status("AI 回复已生成，可改写或编辑后发送")
+        self._ai_set_status("回复已就绪，可微调后发送")
 
     def _ai_generation_cancelled(self):
         self._ai_generating = False
@@ -2346,7 +2358,7 @@ class WXSenderApp:
         self._clear_draft_history()
         if hasattr(self, "ai_source_caption"):
             self.ai_source_caption.configure(text="")
-        self._ai_set_status("候选回复已清空")
+        self._ai_set_status("草稿已清空")
 
     def _insert_phrase_to_draft(self, phrase):
         """把话术文本插入草稿台（切到草稿视图，追加到草稿框末尾，供编辑后发送）。
@@ -2669,10 +2681,12 @@ class WXSenderApp:
         """切换吸附 / 脱离。脱离后面板停在原地、用户可拖到任意屏；重新吸附立即回贴。"""
         self._snap_enabled = not self._snap_enabled
         if self._snap_enabled:
-            self.snap_btn.configure(text="⊙ 跟随")
+            # 现在已开启跟随 → 下次点击将「固定」
+            self.snap_btn.configure(text="○ 固定")
             self._snap_filter.reset()  # 强制下一次轮询立即重新定位
         else:
-            self.snap_btn.configure(text="○ 固定")
+            # 现在已固定 → 下次点击将「跟随」
+            self.snap_btn.configure(text="⊙ 跟随")
 
     def _poll_snap(self):
         """
@@ -3435,7 +3449,7 @@ class WXSenderApp:
         def _restore_send_btn():
             self._sending = False
             if send_btn:
-                send_btn.configure(state="normal", text="确认发送")
+                send_btn.configure(state="normal", text="发送")
 
         def send_task():
             try:
