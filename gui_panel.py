@@ -1038,10 +1038,11 @@ class WXSenderApp:
         # 启动后恢复上次未发送的草稿
         saved_draft = self._app_config.get("draft_text", "")
         if saved_draft:
-            self.root.after(200, lambda: (
-                self.ai_reply_box.delete("1.0", "end"),
-                self.ai_reply_box.insert("1.0", saved_draft),
-            ))
+            def _restore_saved_draft():
+                self.ai_reply_box.delete("1.0", "end")
+                self.ai_reply_box.insert("1.0", saved_draft)
+                self._on_draft_modified()  # 确保发送按钮/改写工具栏随草稿恢复立即同步
+            self.root.after(200, _restore_saved_draft)
         # 启动后延迟做一次被动自检（不抢焦点），提示权限/窗口类问题
         self.root.after(1200, self._startup_self_check)
 
@@ -1294,7 +1295,7 @@ class WXSenderApp:
         if hasattr(self, "ai_regenerate_btn"):
             self.ai_regenerate_btn.configure(state="disabled")
         if hasattr(self, "ctx_summary_btn"):
-            self._set_context_summary("已切换客户端，请重新读取")
+            self._set_context_summary("已切换 IM，请重新读取")
         self._ai_set_status("① 在 IM 窗口打开一个聊天  ② 点「读取并生成」")
         if hasattr(self, "ai_context_box"):
             self._ai_set_context("")
@@ -2210,6 +2211,7 @@ class WXSenderApp:
         self._ai_stop_loading_anim()
         self._ai_set_generating_ui(False)
         self._ai_set_refine_enabled(True)
+        self._on_draft_modified()
         self._ai_set_status("已取消生成")
 
     def _ai_generation_failed(self, message: str):
@@ -3164,11 +3166,11 @@ class WXSenderApp:
         body = "\n".join(lines) if lines else "没有可检查的客户端。"
         if problems:
             self._show_warning(
-                "AX 结构自检发现问题（客户端可能已更新）：\n\n" + body +
+                "诊断发现问题（客户端可能已更新）：\n\n" + body +
                 "\n\n若发送/读取失效，请用 tools/explore_ax.py 重新探测对应客户端的 AX 树。"
             )
         else:
-            self._show_info("AX 结构自检", "全部正常：\n\n" + body)
+            self._show_info("连接诊断结果", "全部正常：\n\n" + body)
 
     def _startup_self_check(self):
         """
@@ -3207,7 +3209,7 @@ class WXSenderApp:
         hint = {
             probes.STATUS_NO_PERMISSION: "需授予辅助功能权限",
             probes.STATUS_NO_WINDOW: "未检测到窗口",
-            probes.STATUS_DEGRADED: "AX 结构异常，请运行自检",
+            probes.STATUS_DEGRADED: "连接异常，请运行诊断",
         }.get(result.status, "自检异常")
         try:
             self._set_status_text(f"{result.display_name}·{hint}")
@@ -3428,7 +3430,7 @@ class WXSenderApp:
         ).pack(side="right", padx=(4, 12), pady=10)
 
         ctk.CTkButton(
-            footer, text="确认发送", width=96, height=32, corner_radius=8,
+            footer, text="发送", width=96, height=32, corner_radius=8,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=confirm_send,
@@ -3449,7 +3451,9 @@ class WXSenderApp:
         def _restore_send_btn():
             self._sending = False
             if send_btn:
-                send_btn.configure(state="normal", text="发送")
+                # 让 _on_draft_modified 根据草稿实际内容决定 state，避免竞态（Norman / Ive）
+                send_btn.configure(text="发送")
+                self._on_draft_modified()
 
         def send_task():
             try:
