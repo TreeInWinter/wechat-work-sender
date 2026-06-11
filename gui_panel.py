@@ -1456,6 +1456,8 @@ class WXSenderApp:
         if hasattr(self, "ai_context_box"):
             self._ai_set_context("")
         self._check_status()
+        # 切换后延迟做一次被动自检，让用户提前感知 degraded 状态
+        self.root.after(800, self._startup_self_check)
 
     def _refresh_targets_and_status(self):
         self._refresh_client_menu()
@@ -1932,11 +1934,14 @@ class WXSenderApp:
         def on_save():
             cur_label = mode_var.get()
             cur_mode = _MODE_VALUES[_MODE_LABELS.index(cur_label)] if cur_label in _MODE_LABELS else "none"
-            new_path = path_var.get().strip()
+            new_path = os.path.expanduser(path_var.get().strip())
             new_scope = scope_var.get().strip()
 
             if cur_mode == "local" and not new_path:
                 self._show_warning("请先选择 Obsidian Vault 路径")
+                return
+            if cur_mode == "local" and new_path and not os.path.isdir(new_path):
+                self._show_warning(f"路径不存在或不是目录：\n{new_path}")
                 return
 
             old_path = self._app_config.get("kb_vault_path", "")
@@ -2454,7 +2459,9 @@ class WXSenderApp:
         self._push_draft_history(draft_before)
         self._ai_set_reply(reply)
         self._on_draft_modified()
-        self._ai_set_status("已改写，可继续微调或发送（可撤销）")
+        self._ai_set_status("已改写，可继续微调或发送（⌘Z 撤销）")
+        if hasattr(self, "ai_refine_entry"):
+            self.ai_refine_entry.delete(0, "end")
 
     def _ai_refine_failed(self, message: str):
         self._ai_generating = False
@@ -3217,8 +3224,11 @@ class WXSenderApp:
                 pass
         self._inline_error_bar = None
 
-    def _show_toast(self, message: str, duration_ms: int = 1800):
+    def _show_toast(self, message: str, duration_ms: int = 0):
         """轻量浮层提示：主窗底部居中，自动消失，不抢焦点（替代弹窗/状态栏瞬时反馈）。"""
+        if not duration_ms:
+            # 按字符数动态计算：每个字符 80ms，最短 1800ms，最长 6000ms
+            duration_ms = max(1800, min(6000, len(message) * 80))
         old = getattr(self, "_toast_label", None)
         if old is not None:
             try:
@@ -3307,7 +3317,7 @@ class WXSenderApp:
         if problems:
             self._show_warning(
                 "诊断发现问题（客户端可能已更新）：\n\n" + body +
-                "\n\n若发送/读取失效，请用 tools/explore_ax.py 重新探测对应客户端的 AX 树。"
+                "\n\n若发送/读取功能持续失效，请尝试重启应用或联系开发者。"
             )
         else:
             self._show_info("连接诊断结果", "全部正常：\n\n" + body)
@@ -3685,12 +3695,17 @@ class WXSenderApp:
         self._refresh_cards()
 
     def _on_close(self):
-        """关闭面板时保存当前草稿供下次恢复，然后退出。"""
+        """关闭面板时保存当前草稿供下次恢复，停止后台监听，然后退出。"""
         draft = self._ai_get_reply()
         try:
             save_config({"draft_text": draft or ""})
         except Exception:
             pass
+        if self._drag_follow is not None:
+            try:
+                self._drag_follow.stop()
+            except Exception:
+                pass
         self.root.quit()
 
     def run(self):
