@@ -255,10 +255,12 @@ def load_phrases() -> dict:
 
 
 def save_phrases(phrases: dict):
-    """保存话术库"""
+    """保存话术库（原子写入，防止崩溃损坏文件）。"""
     os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
+    tmp = DATA_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(phrases, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, DATA_FILE)
 
 
 def normalize_phrase(phrase) -> list:
@@ -1974,9 +1976,17 @@ class WXSenderApp:
         self._ai_messages = msgs
         self.ai_generate_btn.configure(state="normal")
         if not msgs:
-            self._ai_set_context(f"未读取到消息，请先在{self._current_client_name()}中选中聊天窗口。")
-            self._set_context_summary("未读取到消息 · 点击查看")
+            client_name = self._current_client_name()
+            self._ai_set_context(
+                f"未读取到消息。请先切到 {client_name}，打开一个聊天窗口，再点击「读取并生成」。"
+            )
+            self._set_context_summary("未读取到消息 · 请先打开聊天")
             self._ai_set_status("未读取到聊天内容")
+            self._show_inline_error(
+                f"请先在 {client_name} 中打开一个聊天窗口",
+                retry=self._ai_read_and_generate,
+                retry_label="重试",
+            )
             return
         self._ai_set_context(self._format_ai_messages(msgs))
         self._set_context_summary(
@@ -2139,8 +2149,9 @@ class WXSenderApp:
 
         self._hide_inline_error()
         self._ai_generating = True
-        self.ai_generate_btn.configure(state="disabled")
-        self.ai_regenerate_btn.configure(state="disabled")
+        self._ai_cancel = CancelToken()
+        cancel = self._ai_cancel
+        self._ai_set_generating_ui(True)  # 主按钮变为「取消生成」，让用户有退出路径
         self._ai_set_refine_enabled(False)
         self._ai_set_status(f"正在改写：{instruction}")
         self._ai_start_loading_anim()
@@ -2156,6 +2167,9 @@ class WXSenderApp:
         def refine_task():
             try:
                 reply = refine_reply(msgs, draft, instruction, ai_config)
+                if cancel.cancelled:
+                    self.root.after(0, lambda: self._ai_refine_cancelled(draft))
+                    return
                 self.root.after(0, lambda: self._ai_refine_done(reply, draft))
             except (
                 AICommandNotFoundError,
@@ -2163,19 +2177,34 @@ class WXSenderApp:
                 AICommandFailedError,
                 AIEmptyResponseError,
             ) as exc:
+                if cancel.cancelled:
+                    self.root.after(0, lambda: self._ai_refine_cancelled(draft))
+                    return
                 msg = str(exc)
                 self.root.after(0, lambda: self._ai_refine_failed(msg))
             except Exception as exc:
+                if cancel.cancelled:
+                    self.root.after(0, lambda: self._ai_refine_cancelled(draft))
+                    return
                 msg = f"改写失败: {exc}"
                 self.root.after(0, lambda: self._ai_refine_failed(msg))
 
         threading.Thread(target=refine_task, daemon=True).start()
 
+    def _ai_refine_cancelled(self, draft_before: str = ""):
+        """用户取消改写：恢复原草稿，恢复 UI。"""
+        self._ai_generating = False
+        self._ai_stop_loading_anim()
+        self._ai_set_generating_ui(False)
+        self._ai_set_refine_enabled(True)
+        if draft_before:
+            self._ai_set_reply(draft_before)
+        self._ai_set_status("改写已取消")
+
     def _ai_refine_done(self, reply: str, draft_before: str = ""):
         self._ai_generating = False
         self._ai_stop_loading_anim()
-        self.ai_generate_btn.configure(state="normal")
-        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_generating_ui(False)
         self._ai_set_refine_enabled(True)
         self._push_draft_history(draft_before)
         self._ai_set_reply(reply)
@@ -2184,8 +2213,7 @@ class WXSenderApp:
     def _ai_refine_failed(self, message: str):
         self._ai_generating = False
         self._ai_stop_loading_anim()
-        self.ai_generate_btn.configure(state="normal")
-        self.ai_regenerate_btn.configure(state="normal")
+        self._ai_set_generating_ui(False)
         self._ai_set_refine_enabled(True)
         self._ai_set_status("改写失败")
         self._show_inline_error(message)
@@ -2526,6 +2554,10 @@ class WXSenderApp:
         self.root.bind("<Escape>", lambda e: self._clear_search())
         self.root.bind("<Command-z>", self._ai_undo_draft)
         self.root.bind("<Command-Z>", self._ai_undo_draft)
+        # macOS 标准：⌘W 隐藏面板，⌘Q 退出，⌘, 打开设置
+        self.root.bind("<Command-w>", lambda e: self.root.withdraw())
+        self.root.bind("<Command-q>", lambda e: self.root.quit())
+        self.root.bind("<Command-comma>", lambda e: self._show_ai_settings())
         for i in range(1, 10):
             self.root.bind(f"<Command-Key-{i}>", lambda e, idx=i: self._send_visible_phrase(idx))
 
@@ -2665,13 +2697,24 @@ class WXSenderApp:
         threading.Thread(target=check, daemon=True).start()
 
     def _update_status(self, client, running: bool):
-        if not AXIsProcessTrusted():
-            # 权限缺失是异常态（spec v2 状态色：异常=红），非「检测中」；
-            # 权限门槛前置到主路径：草稿区内联引导，不藏在折叠菜单里
+        # 不同客户端依赖不同权限：AX 客户端（企业微信/大象）需辅助功能，
+        # 非 AX 客户端（微信）只需屏幕录制；避免对微信用户误报辅助功能错误
+        probe = probes.get_probe(client.adapter.client_id) if client else None
+        client_uses_ax = probe is None or probe.uses_ax
+
+        if client_uses_ax and not AXIsProcessTrusted():
             self.status_dot.configure(text_color=DOT_ERR)
             self._set_status_text("需要辅助功能权限")
             self._show_inline_error("需要辅助功能权限",
                                     retry=self._show_permission_guide,
+                                    retry_label="去开启")
+            self._perm_error_active = True
+            return
+        elif not client_uses_ax and not has_screen_recording_permission():
+            self.status_dot.configure(text_color=DOT_ERR)
+            self._set_status_text("需要屏幕录制权限")
+            self._show_inline_error("需要屏幕录制权限（微信消息读取需要）",
+                                    retry=lambda: open_privacy_pane(PREF_SCREEN_CAPTURE),
                                     retry_label="去开启")
             self._perm_error_active = True
             return
@@ -3045,6 +3088,9 @@ class WXSenderApp:
             )
             if worthy:
                 self.root.after(0, lambda: self._show_startup_warning(result))
+                # 权限缺失时自动弹引导，新用户不用翻 ⋯ 菜单
+                if result.status == probes.STATUS_NO_PERMISSION:
+                    self.root.after(400, self._show_permission_guide)
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -3068,6 +3114,15 @@ class WXSenderApp:
         self.root.attributes("-topmost", True)
         return result
 
+    def _save_phrases_safe(self) -> bool:
+        """保存话术库；失败时弹窗告知用户，返回 False。"""
+        try:
+            self._save_phrases_safe()
+            return True
+        except OSError as e:
+            self._show_warning(f"话术保存失败：{e}\n请检查磁盘空间或文件权限。")
+            return False
+
     # ── 话术管理 ─────────────────────────────────────────────────
 
     def _add_phrase(self):
@@ -3081,7 +3136,7 @@ class WXSenderApp:
         group = self.group_var.get()
         phrase = result[0]["content"] if len(result) == 1 and result[0]["type"] == "text" else result
         self.phrases.setdefault(group, []).append(phrase)
-        save_phrases(self.phrases)
+        self._save_phrases_safe()
         self._refresh_cards()
 
     def _delete_phrase(self):
@@ -3097,7 +3152,7 @@ class WXSenderApp:
                 if p == target:
                     phrases_list.pop(i)
                     break
-            save_phrases(self.phrases)
+            self._save_phrases_safe()
             self._refresh_cards()
 
     def _edit_phrase(self, idx: int, group: str | None = None):
@@ -3118,7 +3173,7 @@ class WXSenderApp:
             phrases_list[idx] = result[0]["content"]
         else:
             phrases_list[idx] = result
-        save_phrases(self.phrases)
+        self._save_phrases_safe()
         self._refresh_cards()
 
     def _send_custom(self):
@@ -3310,7 +3365,7 @@ class WXSenderApp:
             name = name.strip()
             if name not in self.phrases:
                 self.phrases[name] = []
-                save_phrases(self.phrases)
+                self._save_phrases_safe()
                 self.group_menu.configure(values=list(self.phrases.keys()))
                 self.group_var.set(name)
                 self.current_group = name
@@ -3334,7 +3389,7 @@ class WXSenderApp:
             return
         # 重建 dict 以保持分组顺序不变
         self.phrases = {(new if k == old else k): v for k, v in self.phrases.items()}
-        save_phrases(self.phrases)
+        self._save_phrases_safe()
         self.current_group = new
         self.group_menu.configure(values=list(self.phrases.keys()))
         self.group_var.set(new)
@@ -3355,7 +3410,7 @@ class WXSenderApp:
         ):
             return
         self.phrases.pop(group, None)
-        save_phrases(self.phrases)
+        self._save_phrases_safe()
         self.current_group = next(iter(self.phrases.keys()))
         self.group_menu.configure(values=list(self.phrases.keys()))
         self.group_var.set(self.current_group)
