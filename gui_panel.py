@@ -169,7 +169,7 @@ TEXT_MAIN = "#1F2329"   # 主文字
 TEXT_SUB  = "#646A73"   # 次文字
 TEXT_WEAK = "#8F959E"   # 弱文字
 
-ctk.set_appearance_mode("light")    # 轻量中性方向：锁定浅色，不跟随系统深色
+ctk.set_appearance_mode("system")   # 跟随系统深色/浅色偏好（HIG 要求）
 ctk.set_default_color_theme("blue")
 
 # ============================================================
@@ -237,14 +237,26 @@ def get_wechat_window_bounds() -> tuple | None:
         return None
 
 
+_phrases_corrupt_backup: str = ""  # 损坏时备份的文件路径，供启动后告警
+
+
 def load_phrases() -> dict:
-    """加载话术库"""
+    """加载话术库。文件损坏时自动备份并返回默认值。"""
+    global _phrases_corrupt_backup
+    _phrases_corrupt_backup = ""
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
-            pass
+            # 备份损坏文件，防止后续保存覆盖原始数据
+            try:
+                import shutil, time as _time
+                backup = DATA_FILE + f".corrupt.{int(_time.time())}"
+                shutil.copy2(DATA_FILE, backup)
+                _phrases_corrupt_backup = backup
+            except Exception:
+                _phrases_corrupt_backup = DATA_FILE  # 备份失败，至少记录原路径
     if DATA_FILE != DEFAULT_DATA_FILE and os.path.exists(DEFAULT_DATA_FILE):
         try:
             with open(DEFAULT_DATA_FILE, "r", encoding="utf-8") as f:
@@ -1015,8 +1027,21 @@ class WXSenderApp:
 
         self._build_ui()
         self._bind_shortcuts()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._poll_snap)
         self.root.after(300, self._start_drag_follow)
+        # 话术文件损坏告警（load_phrases 在 __init__ 更早执行，UI 就绪后再弹）
+        if _phrases_corrupt_backup:
+            self.root.after(800, lambda: self._show_inline_error(
+                f"话术文件损坏，已备份为 {os.path.basename(_phrases_corrupt_backup)}，当前使用默认话术"
+            ))
+        # 启动后恢复上次未发送的草稿
+        saved_draft = self._app_config.get("draft_text", "")
+        if saved_draft:
+            self.root.after(200, lambda: (
+                self.ai_reply_box.delete("1.0", "end"),
+                self.ai_reply_box.insert("1.0", saved_draft),
+            ))
         # 启动后延迟做一次被动自检（不抢焦点），提示权限/窗口类问题
         self.root.after(1200, self._startup_self_check)
 
@@ -1064,9 +1089,9 @@ class WXSenderApp:
         )
         self.view_toggle_btn.pack(side="right", padx=(0, 2))
 
-        # 吸附/脱离开关：按钮文字即「下一步动作」——吸附时显示「脱离」，脱离时显示「吸附」
+        # 吸附/脱离开关：按钮文字即「当前状态」——吸附时显示「⊙ 贴合」，脱离时显示「○ 脱离」
         self.snap_btn = ctk.CTkButton(
-            status_frame, text="脱离", width=44, height=30,
+            status_frame, text="⊙ 贴合", width=52, height=30,
             corner_radius=8, fg_color="transparent",
             hover_color=PILL_HOVER, text_color=TEXT_SUB,
             font=ctk.CTkFont(family="PingFang SC", size=11),
@@ -1259,6 +1284,15 @@ class WXSenderApp:
             self.current_client,
         )
         self._snap_filter.reset()
+        # 切换客户端时清空 AI 上下文，避免将 A 客户端的草稿/上下文误发给 B
+        if hasattr(self, "ai_reply_box"):
+            self.ai_reply_box.delete("1.0", "end")
+        self._ai_messages = []
+        self._clear_draft_history()
+        if hasattr(self, "ctx_summary_btn"):
+            self._set_context_summary("已切换客户端，请重新读取")
+        if hasattr(self, "ai_context_box"):
+            self._ai_set_context("")
         self._check_status()
 
     def _refresh_targets_and_status(self):
@@ -1425,12 +1459,13 @@ class WXSenderApp:
         # 主操作 确认发送 撑满，低频项（复制 / 存入知识库 / 清空）收进 ⋯ 菜单。
         send_row = ctk.CTkFrame(self.ai_view, fg_color="transparent")
         send_row.grid_columnconfigure(0, weight=1)
-        ctk.CTkButton(
+        self.ai_send_btn = ctk.CTkButton(
             send_row, text="确认发送", height=38, corner_radius=10,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
             command=self._ai_send_reply,
-        ).grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        )
+        self.ai_send_btn.grid(row=0, column=0, padx=(0, 6), sticky="ew")
         self.ai_overflow_btn = ctk.CTkButton(
             send_row, text="⋯", width=44, height=38, corner_radius=10,
             fg_color="transparent", border_width=1, border_color=BORDER,
@@ -1857,10 +1892,13 @@ class WXSenderApp:
             round(b1 + (b2 - b1) * t),
         )
 
-    def _ai_start_loading_anim(self):
-        """启动候选回复文本框的 AI 生成动效（边框呼吸 + 框内光标闪烁）。"""
+    def _ai_start_loading_anim(self, preserve_content: bool = False):
+        """启动候选回复文本框的 AI 生成动效（边框呼吸 + 框内光标闪烁）。
+        preserve_content=True：只做边框动效，不清空/写入文本框内容（改写场景）。
+        """
         self._ai_anim_running = True
         self._ai_anim_tick = 0
+        self._ai_anim_preserve_content = preserve_content
         tb = self.ai_reply_box._textbox
         tb.tag_configure("anim_dot",  foreground=PRIMARY)
         tb.tag_configure("anim_msg",  foreground=TEXT_WEAK)
@@ -1871,9 +1909,10 @@ class WXSenderApp:
         """停止动效，恢复边框颜色，清空占位文字，恢复文本框可编辑。"""
         self._ai_anim_running = False
         self.ai_reply_box.configure(border_color=BORDER)
-        # 恢复底层 tk.Text 为可编辑（_ai_anim_step 最后一次 tick 可能将其设为 disabled）
         self.ai_reply_box._textbox.configure(state="normal")
-        self.ai_reply_box.delete("1.0", "end")
+        if not getattr(self, "_ai_anim_preserve_content", False):
+            self.ai_reply_box.delete("1.0", "end")
+        self._ai_anim_preserve_content = False
 
     def _ai_anim_step(self):
         if not self._ai_anim_running:
@@ -1886,19 +1925,19 @@ class WXSenderApp:
             border_color=self._lerp_color(BORDER, PRIMARY, t_border)
         )
 
-        # 框内占位文字：彩色点 + 提示文字 + 闪烁光标
-        t_dot = (math.sin(n * math.pi / 10) + 1) / 2
-        dot_color = self._lerp_color("#a0c4ff", PRIMARY, t_dot)
-        cursor_char = "▋" if (n // 9) % 2 == 0 else " "
-
-        tb = self.ai_reply_box._textbox
-        tb.configure(state="normal")
-        tb.delete("1.0", "end")
-        tb.tag_configure("anim_dot", foreground=dot_color)
-        tb.insert("end", "⬤ ", "anim_dot")
-        tb.insert("end", "AI 正在生成回复", "anim_msg")
-        tb.insert("end", cursor_char, "anim_cur")
-        tb.configure(state="disabled")
+        # 框内占位文字：改写模式保留原内容，仅生成模式写入占位动效
+        if not getattr(self, "_ai_anim_preserve_content", False):
+            t_dot = (math.sin(n * math.pi / 10) + 1) / 2
+            dot_color = self._lerp_color("#a0c4ff", PRIMARY, t_dot)
+            cursor_char = "▋" if (n // 9) % 2 == 0 else " "
+            tb = self.ai_reply_box._textbox
+            tb.configure(state="normal")
+            tb.delete("1.0", "end")
+            tb.tag_configure("anim_dot", foreground=dot_color)
+            tb.insert("end", "⬤ ", "anim_dot")
+            tb.insert("end", "AI 正在生成回复", "anim_msg")
+            tb.insert("end", cursor_char, "anim_cur")
+            tb.configure(state="disabled")
 
         self._ai_anim_tick += 1
         self.root.after(50, self._ai_anim_step)
@@ -1953,6 +1992,10 @@ class WXSenderApp:
         if self._ai_generating:
             return
         self._hide_inline_error()
+        # 新一轮生成前将现有草稿压栈，确保取消后可以恢复
+        current = self._ai_get_reply()
+        if current:
+            self._push_draft_history(current)
         self.ai_reply_box.delete("1.0", "end")
         self._ai_origin_draft = ""  # 新一轮读取，清空上一轮原稿基准
         self._ai_set_status("正在读取聊天内容...")
@@ -1977,16 +2020,29 @@ class WXSenderApp:
         self.ai_generate_btn.configure(state="normal")
         if not msgs:
             client_name = self._current_client_name()
+            # 非 AX 客户端（微信）用截图 OCR 读取，权限缺失也会返回空列表，需区分
+            probe = probes.get_probe(self.current_client.adapter.client_id) if self.current_client else None
+            client_uses_ax = probe is None or probe.uses_ax
+            if not client_uses_ax and not has_screen_recording_permission():
+                error_msg = "需要屏幕录制权限才能读取微信消息"
+                self._set_context_summary("需要屏幕录制权限")
+                self._show_inline_error(
+                    error_msg,
+                    retry=lambda: open_privacy_pane(PREF_SCREEN_CAPTURE),
+                    retry_label="去开启",
+                )
+            else:
+                error_msg = f"请先在 {client_name} 中打开一个聊天窗口"
+                self._set_context_summary("未读取到消息 · 请先打开聊天")
+                self._show_inline_error(
+                    error_msg,
+                    retry=self._ai_read_and_generate,
+                    retry_label="重试",
+                )
             self._ai_set_context(
                 f"未读取到消息。请先切到 {client_name}，打开一个聊天窗口，再点击「读取并生成」。"
             )
-            self._set_context_summary("未读取到消息 · 请先打开聊天")
             self._ai_set_status("未读取到聊天内容")
-            self._show_inline_error(
-                f"请先在 {client_name} 中打开一个聊天窗口",
-                retry=self._ai_read_and_generate,
-                retry_label="重试",
-            )
             return
         self._ai_set_context(self._format_ai_messages(msgs))
         self._set_context_summary(
@@ -2120,7 +2176,11 @@ class WXSenderApp:
         self._ai_set_generating_ui(False)
         self._ai_set_refine_enabled(True)
         self._ai_set_status("生成失败")
-        self._show_inline_error(message, retry=self._ai_regenerate)
+        # 有历史草稿时提供一键恢复，避免用户丢失上一版内容
+        if len(self._draft_history):
+            self._show_inline_error(message, retry=self._ai_undo_draft, retry_label="恢复上一版")
+        else:
+            self._show_inline_error(message, retry=self._ai_regenerate)
 
     # ── 草稿改写（对话式微调）─────────────────────────────────
 
@@ -2154,7 +2214,7 @@ class WXSenderApp:
         self._ai_set_generating_ui(True)  # 主按钮变为「取消生成」，让用户有退出路径
         self._ai_set_refine_enabled(False)
         self._ai_set_status(f"正在改写：{instruction}")
-        self._ai_start_loading_anim()
+        self._ai_start_loading_anim(preserve_content=True)  # 保留原草稿内容，只做边框动效
 
         ai_config = AIReplyConfig(
             kb_enabled=self._app_config.get("kb_enabled", False),
@@ -2575,10 +2635,10 @@ class WXSenderApp:
         """切换吸附 / 脱离。脱离后面板停在原地、用户可拖到任意屏；重新吸附立即回贴。"""
         self._snap_enabled = not self._snap_enabled
         if self._snap_enabled:
-            self.snap_btn.configure(text="脱离")
+            self.snap_btn.configure(text="⊙ 贴合")
             self._snap_filter.reset()  # 强制下一次轮询立即重新定位
         else:
-            self.snap_btn.configure(text="吸附")
+            self.snap_btn.configure(text="○ 脱离")
 
     def _poll_snap(self):
         """
@@ -3117,7 +3177,7 @@ class WXSenderApp:
     def _save_phrases_safe(self) -> bool:
         """保存话术库；失败时弹窗告知用户，返回 False。"""
         try:
-            self._save_phrases_safe()
+            save_phrases(self.phrases)
             return True
         except OSError as e:
             self._show_warning(f"话术保存失败：{e}\n请检查磁盘空间或文件权限。")
@@ -3330,31 +3390,47 @@ class WXSenderApp:
 
     def _send_blocks_async(self, blocks: list):
         """确认后实际发送。纯文本沿用原链路；含图片渲染为一张图片保证单条消息。"""
+        if getattr(self, "_sending", False):
+            return
+        self._sending = True
+        send_btn = getattr(self, "ai_send_btn", None)
+        if send_btn:
+            send_btn.configure(state="disabled", text="发送中…")
         client = self.current_client
+
+        def _restore_send_btn():
+            self._sending = False
+            if send_btn:
+                send_btn.configure(state="normal", text="确认发送")
 
         def send_task():
             try:
                 send_blocks_with_client(client, blocks)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
                 self.root.after(0, lambda: self._show_toast("已发送"))
+                self.root.after(0, _restore_send_btn)
             except UnsupportedClientAction as e:
                 msg = str(e)
-                self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
                 self.root.after(0, lambda: self._set_status_text("接管能力待验证"))
+                self.root.after(0, lambda: self._show_inline_error(msg, retry=lambda: self._send_blocks_async(blocks)))
+                self.root.after(0, _restore_send_btn)
             except NoChatWindowError as e:
                 msg = str(e)
-                self.root.after(0, lambda: self._show_warning(msg))
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))
                 self.root.after(0, lambda: self._set_status_text("未选中聊天窗口"))
+                self.root.after(0, lambda: self._show_inline_error(msg, retry=lambda: self._send_blocks_async(blocks)))
+                self.root.after(0, _restore_send_btn)
             except FileNotFoundError as e:
-                msg = str(e)
-                self.root.after(0, lambda: self._show_warning(msg))
+                msg = f"发送失败：图片文件不存在（{e}）"
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
-                self.root.after(0, lambda: self._show_toast("发送失败：图片文件不存在"))
-            except Exception:
+                self.root.after(0, lambda: self._show_inline_error(msg))
+                self.root.after(0, _restore_send_btn)
+            except Exception as e:
+                msg = f"发送失败：{e}"
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_ERR))
-                self.root.after(0, lambda: self._show_toast("发送失败"))
+                self.root.after(0, lambda: self._show_inline_error(msg, retry=lambda: self._send_blocks_async(blocks)))
+                self.root.after(0, _restore_send_btn)
             self.root.after(3000, self._check_status)
 
         threading.Thread(target=send_task, daemon=True).start()
@@ -3415,6 +3491,15 @@ class WXSenderApp:
         self.group_menu.configure(values=list(self.phrases.keys()))
         self.group_var.set(self.current_group)
         self._refresh_cards()
+
+    def _on_close(self):
+        """关闭面板时保存当前草稿供下次恢复，然后退出。"""
+        draft = self._ai_get_reply()
+        try:
+            save_config({"draft_text": draft or ""})
+        except Exception:
+            pass
+        self.root.quit()
 
     def run(self):
         self.root.mainloop()
