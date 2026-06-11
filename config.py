@@ -42,9 +42,11 @@ def load_config() -> dict:
 
 
 def save_config(data: dict) -> None:
-    """将 data 合并写入 config.json。"""
+    """将 data 合并写入 config.json（原子写入，防止崩溃损坏文件）。"""
     current = load_config()
     current.update(data)
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+    tmp = CONFIG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(current, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, CONFIG_FILE)
