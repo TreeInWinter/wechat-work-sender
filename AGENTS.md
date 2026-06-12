@@ -226,6 +226,21 @@ docs/
    - 现有测试命令 `.venv/bin/python -m pytest -q` 通过，结果为 `64 passed`。
    - 代码现状中 `WechatWorkAdapter.send_blocks()` 对含图片 blocks 会走 `sender.send_blocks_single()`（合成单张图片/单条消息路径），与第 6 条“图文混排用 send_message + send_image 串联”的历史决策存在漂移；涉及企业微信图文发送前需优先核对真实期望。
 
+12. **AI 草稿台与话术页 iOS 风格收敛（2026-06-12）**：`codex/ios-polish-marked-area` 分支整理 AI 草稿台顶部与话术页管理区的凌乱区域。
+   - 顶部两颗「读取并生成 / 重新生成」按钮移除，顶部只保留一张摘要卡（状态 + 上下文折叠入口），降低视觉噪音。
+   - 底部主按钮变为唯一主操作：空草稿为「读取并生成」，有草稿为「发送」，读取中为「读取中…」，生成中为红色「取消生成」，发送中为「发送中…」。
+   - 「重新生成」移入底部 `⋯` 菜单，仅已有上下文且非读取/生成中时可用。
+   - 话术页分组新增/改名/删除和「删除选中话术」收进 `⋯` 管理菜单；底部只保留「添加话术」，搜索清空压缩为小型 `×`。
+   - 话术卡片右侧红框按钮墙继续收敛：每条卡片只保留一个轻量 `⋯`，单条「发送 / 插入草稿 / 编辑」进入卡片菜单；`⌘1-9` 继续保留快速发送。
+   - 验证：`.venv/bin/python -m py_compile gui_panel.py sender.py`、`.venv/bin/python -m pytest -q` 通过，结果为 `182 passed, 1 skipped`；窗口实例化 smoke 验证主按钮状态切换与话术页控件存在；`screencapture` 对 AI 草稿台与话术页完成图片级视觉验收。
+
+13. **支持作者 / 微信收款码（2026-06-12）**：右上 `⋯` 菜单新增「支持作者…」，弹出 iOS 风格二维码面板。
+   - 收款码资产固定复制到 `assets/donation-wechat.jpg`，不要依赖微信临时文件路径。
+   - `app_resource_path()` 兼容源码运行和 PyInstaller `_MEIPASS`；`make_contained_image()` 用于完整等比展示二维码，不裁剪。
+   - `build.spec` 必须包含 `("assets/donation-wechat.jpg", "assets")`，否则打包后的 `.app` 找不到收款码。
+   - 验证：新增 `ResourcePathTests` 覆盖资源路径和二维码存在；`.venv/bin/python -m pytest -q` 结果为 `184 passed, 1 skipped`；`screencapture` 视觉验收确认「支持作者」面板里二维码真实可见。
+   - 发送触发策略：`donation_send_count` 记录成功发送次数，每成功发送 10 次后延迟弹出一次「支持作者」面板；失败发送不计数、不弹窗。`next_donation_send_count()` 有单测覆盖 10/20 次触发。
+
 ---
 
 ## 常用命令
