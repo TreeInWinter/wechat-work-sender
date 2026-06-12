@@ -188,6 +188,161 @@ SYSTEM_VARIABLES = {
     "星期": lambda: "一二三四五六日"[datetime.now().weekday()],
 }
 
+
+# ============================================================
+# 自定义弹出菜单（替代原生 tk.Menu）
+# ============================================================
+
+class _PopupMenu:
+    """圆角自绘弹出菜单，带 hover 高亮和分组线。
+
+    用法::
+
+        m = _PopupMenu(root)
+        m.add_command("刷新", cmd)
+        m.add_separator()
+        m.add_command("设置…", cmd2, state="disabled")
+        m.add_footer("⌘F 搜索 · Esc 清空")
+        m.show(anchor_widget)          # 右对齐到 anchor 下方弹出
+    """
+
+    W      = 228   # 固定宽度 px
+    ITEM_H = 36    # 每行高度
+    RADIUS = 12    # 窗口圆角
+    I_RAD  = 7     # 行 hover 圆角
+    PX     = 4     # 左右内边距
+    PY     = 5     # 上下内边距
+
+    def __init__(self, root: tk.Tk):
+        self._root = root
+        self._items: list[dict] = []
+
+    # ── 构建 API ──────────────────────────────────────────────
+    def add_command(self, label: str, command=None, state: str = "normal"):
+        self._items.append({"t": "cmd", "label": label, "cmd": command, "state": state})
+        return self
+
+    def add_separator(self):
+        self._items.append({"t": "sep"})
+        return self
+
+    def add_footer(self, text: str):
+        self._items.append({"t": "foot", "text": text})
+        return self
+
+    # ── 弹出 ──────────────────────────────────────────────────
+    def show(self, anchor):
+        # 持有 dismiss 引用供子项和全局绑定共享
+        _cleanup: list = [None]   # [(<root-Button-1 id>, <root-Escape id>)]
+
+        def _dismiss(_e=None):
+            ids = _cleanup[0]
+            if ids:
+                _cleanup[0] = None
+                try:
+                    self._root.unbind("<Button-1>", ids[0])
+                except Exception:
+                    pass
+                try:
+                    self._root.unbind("<Escape>", ids[1])
+                except Exception:
+                    pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        win = tk.Toplevel(self._root)
+        win.overrideredirect(True)
+        win.configure(bg=SURFACE)
+        win.attributes("-topmost", True)
+
+        # ── 主容器 ─────────────────────────────────────────
+        outer = ctk.CTkFrame(
+            win, fg_color=SURFACE, corner_radius=self.RADIUS,
+            border_width=1, border_color="#D1D9E6",
+        )
+        outer.pack(fill="both", expand=True)
+        ctk.CTkFrame(outer, height=self.PY, fg_color="transparent").pack()
+
+        for item in self._items:
+            t = item["t"]
+            if t == "sep":
+                ctk.CTkFrame(outer, height=1, fg_color=BORDER, corner_radius=0).pack(
+                    fill="x", padx=10, pady=3,
+                )
+            elif t == "foot":
+                ctk.CTkLabel(
+                    outer, text=item["text"], text_color=TEXT_WEAK,
+                    anchor="w", wraplength=self.W - 28,
+                    font=ctk.CTkFont(family="PingFang SC", size=10),
+                ).pack(fill="x", padx=14, pady=(2, 8))
+            else:
+                self._build_item(outer, item, _dismiss)
+
+        ctk.CTkFrame(outer, height=self.PY, fg_color="transparent").pack()
+
+        # ── 定位：右对齐锚点，贴近按钮下方 ────────────────
+        win.update_idletasks()
+        h = outer.winfo_reqheight()
+
+        ax = anchor.winfo_rootx() + anchor.winfo_width() - self.W
+        ay = anchor.winfo_rooty() + anchor.winfo_height() + 4
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        ax = max(4, min(ax, sw - self.W - 4))
+        if ay + h > sh - 20:
+            ay = anchor.winfo_rooty() - h - 4
+
+        win.geometry(f"{self.W}x{h}+{ax}+{ay}")
+        win.lift()
+
+        # ── 关闭：点击弹窗外部 / Escape ────────────────────
+        # macOS overrideredirect 窗口不持有键盘焦点，无法用 FocusOut。
+        # 延迟 100ms 再绑，避免「开菜单的那次点击」被立即判定为外部点击。
+        def _outside_click(e):
+            try:
+                if not (win.winfo_rootx() <= e.x_root <= win.winfo_rootx() + win.winfo_width()
+                        and win.winfo_rooty() <= e.y_root <= win.winfo_rooty() + win.winfo_height()):
+                    _dismiss()
+            except Exception:
+                _dismiss()
+
+        def _bind():
+            bid = self._root.bind("<Button-1>", _outside_click, add="+")
+            eid = self._root.bind("<Escape>",   _dismiss,       add="+")
+            _cleanup[0] = (bid, eid)
+
+        self._root.after(100, _bind)
+
+    # ── 内部：一行菜单项 ──────────────────────────────────────
+    def _build_item(self, parent, item, dismiss_fn):
+        disabled = item.get("state") == "disabled"
+        command  = item.get("cmd")
+
+        row = ctk.CTkFrame(parent, fg_color="transparent",
+                           corner_radius=self.I_RAD, height=self.ITEM_H)
+        row.pack(fill="x", padx=self.PX, pady=1)
+        row.pack_propagate(False)
+
+        lbl = ctk.CTkLabel(
+            row, text=item["label"],
+            text_color=TEXT_WEAK if disabled else TEXT_MAIN,
+            anchor="w",
+            font=ctk.CTkFont(family="PingFang SC", size=13),
+        )
+        lbl.pack(fill="both", expand=True, padx=10)
+
+        if not disabled and command:
+            def _click(_e=None, cmd=command):
+                dismiss_fn()
+                cmd()
+
+            for w in (row, lbl):
+                w.bind("<ButtonRelease-1>", _click)
+                w.bind("<Enter>", lambda _e, r=row: r.configure(fg_color=PILL_HOVER))
+                w.bind("<Leave>", lambda _e, r=row: r.configure(fg_color="transparent"))
+
+
 # 默认话术库
 DEFAULT_PHRASES = {
     "问候语": [
@@ -1307,25 +1462,16 @@ class WXSenderApp:
 
     def _show_overflow_menu(self):
         """折叠菜单：把刷新/设置/权限/自检等低频操作收进下拉，给状态栏腾空间。"""
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="刷新状态与 IM 连接", command=self._refresh_targets_and_status)
-        menu.add_separator()
-        menu.add_command(label="AI / 知识库设置…", command=self._show_ai_settings)
         density_label = "切换为紧凑布局" if self._density == "comfortable" else "切换为舒适布局"
-        menu.add_command(label=density_label, command=self._toggle_density)
-        menu.add_command(label="权限引导…", command=self._show_permission_guide)
-        menu.add_command(label="诊断连接…", command=self._run_self_check_async)
-        menu.add_separator()
-        menu.add_command(
-            label="快捷键：⌘F 搜索 · ⌘↩ 发送自定义 · ⌘1-9 发送话术 · Esc 清空",
-            state="disabled",
-        )
-        try:
-            x = self.menu_btn.winfo_rootx()
-            y = self.menu_btn.winfo_rooty() + self.menu_btn.winfo_height()
-            menu.tk_popup(x, y)
-        finally:
-            menu.grab_release()
+        (_PopupMenu(self.root)
+         .add_command("刷新状态与 IM 连接", self._refresh_targets_and_status)
+         .add_separator()
+         .add_command("AI / 知识库设置…",  self._show_ai_settings)
+         .add_command(density_label,        self._toggle_density)
+         .add_command("权限引导…",          self._show_permission_guide)
+         .add_command("诊断连接…",          self._run_self_check_async)
+         .add_footer("⌘F 搜索 · ⌘↩ 发送自定义 · ⌘1-9 发送话术 · Esc 清空")
+         .show(self.menu_btn))
 
     def _toggle_density(self):
         """在舒适 / 紧凑布局间切换，持久化到 config 并立即重排话术卡片。"""
@@ -1363,20 +1509,13 @@ class WXSenderApp:
     def _ai_overflow_menu(self):
         """草稿台底部 ⋯ 溢出菜单：低频项（复制 / 存入知识库 / 清空）。"""
         has_draft = bool(self.ai_reply_box.get("1.0", "end").strip())
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="复制草稿", command=self._ai_copy_reply,
-                         state=("normal" if has_draft else "disabled"))
-        menu.add_command(label="存入知识库…", command=self._ai_kb_capture_async,
-                         state=("normal" if has_draft else "disabled"))
-        menu.add_separator()
-        menu.add_command(label="清空草稿", command=self._ai_clear_reply,
-                         state=("normal" if has_draft else "disabled"))
-        try:
-            x = self.ai_overflow_btn.winfo_rootx()
-            y = self.ai_overflow_btn.winfo_rooty() + self.ai_overflow_btn.winfo_height()
-            menu.tk_popup(x, y)
-        finally:
-            menu.grab_release()
+        s = "normal" if has_draft else "disabled"
+        (_PopupMenu(self.root)
+         .add_command("复制草稿",    self._ai_copy_reply,      state=s)
+         .add_command("存入知识库…", self._ai_kb_capture_async, state=s)
+         .add_separator()
+         .add_command("清空草稿",    self._ai_clear_reply,     state=s)
+         .show(self.ai_overflow_btn))
 
     def _build_ai_view(self):
         action_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
