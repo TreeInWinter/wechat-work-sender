@@ -1038,10 +1038,11 @@ class WXSenderApp:
         # 启动后恢复上次未发送的草稿
         saved_draft = self._app_config.get("draft_text", "")
         if saved_draft:
-            self.root.after(200, lambda: (
-                self.ai_reply_box.delete("1.0", "end"),
-                self.ai_reply_box.insert("1.0", saved_draft),
-            ))
+            def _restore_saved_draft():
+                self.ai_reply_box.delete("1.0", "end")
+                self.ai_reply_box.insert("1.0", saved_draft)
+                self._on_draft_modified()  # 确保发送按钮/改写工具栏随草稿恢复立即同步
+            self.root.after(200, _restore_saved_draft)
         # 启动后延迟做一次被动自检（不抢焦点），提示权限/窗口类问题
         self.root.after(1200, self._startup_self_check)
 
@@ -1089,9 +1090,10 @@ class WXSenderApp:
         )
         self.view_toggle_btn.pack(side="right", padx=(0, 2))
 
-        # 吸附/脱离开关：按钮文字即「当前状态」——吸附时显示「⊙ 贴合」，脱离时显示「○ 脱离」
+        # 吸附/脱离开关：按钮文字描述「点击后发生的事」（macOS HIG）
+        # 跟随状态 → 显示「固定」（点击将固定）；固定状态 → 显示「跟随」（点击将恢复跟随）
         self.snap_btn = ctk.CTkButton(
-            status_frame, text="⊙ 贴合", width=52, height=30,
+            status_frame, text="○ 固定", width=52, height=30,
             corner_radius=8, fg_color="transparent",
             hover_color=PILL_HOVER, text_color=TEXT_SUB,
             font=ctk.CTkFont(family="PingFang SC", size=11),
@@ -1287,10 +1289,14 @@ class WXSenderApp:
         # 切换客户端时清空 AI 上下文，避免将 A 客户端的草稿/上下文误发给 B
         if hasattr(self, "ai_reply_box"):
             self.ai_reply_box.delete("1.0", "end")
+            self._on_draft_modified()
         self._ai_messages = []
         self._clear_draft_history()
+        if hasattr(self, "ai_regenerate_btn"):
+            self.ai_regenerate_btn.configure(state="disabled")
         if hasattr(self, "ctx_summary_btn"):
-            self._set_context_summary("已切换客户端，请重新读取")
+            self._set_context_summary("已切换 IM，请重新读取")
+        self._ai_set_status("① 在 IM 窗口打开一个聊天  ② 点「读取并生成」")
         if hasattr(self, "ai_context_box"):
             self._ai_set_context("")
         self._check_status()
@@ -1302,13 +1308,13 @@ class WXSenderApp:
     def _show_overflow_menu(self):
         """折叠菜单：把刷新/设置/权限/自检等低频操作收进下拉，给状态栏腾空间。"""
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="刷新状态与接管对象", command=self._refresh_targets_and_status)
+        menu.add_command(label="刷新状态与 IM 连接", command=self._refresh_targets_and_status)
         menu.add_separator()
         menu.add_command(label="AI / 知识库设置…", command=self._show_ai_settings)
         density_label = "切换为紧凑布局" if self._density == "comfortable" else "切换为舒适布局"
         menu.add_command(label=density_label, command=self._toggle_density)
         menu.add_command(label="权限引导…", command=self._show_permission_guide)
-        menu.add_command(label="AX 结构自检", command=self._run_self_check_async)
+        menu.add_command(label="诊断连接…", command=self._run_self_check_async)
         menu.add_separator()
         menu.add_command(
             label="快捷键：⌘F 搜索 · ⌘↩ 发送自定义 · ⌘1-9 发送话术 · Esc 清空",
@@ -1337,7 +1343,7 @@ class WXSenderApp:
         return self.current_client.adapter.window_bounds()
 
     def _current_client_name(self) -> str:
-        return self.current_client.display_name if self.current_client else "当前接管对象"
+        return self.current_client.display_name if self.current_client else "当前 IM"
 
     def _toggle_view(self):
         target = "phrases" if self.mode_var.get() == "ai" else "ai"
@@ -1376,6 +1382,7 @@ class WXSenderApp:
         action_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
         action_frame.pack(fill="x", padx=12, pady=(8, 6))
         action_frame.grid_columnconfigure((0, 1), weight=1)
+        self._kb_row_anchor = action_frame  # 用于 kb_row 动态 pack/unpack 时的锚点
 
         self.ai_generate_btn = ctk.CTkButton(
             action_frame, text="读取并生成", height=34, corner_radius=8,
@@ -1390,7 +1397,7 @@ class WXSenderApp:
             fg_color="transparent", border_width=1, border_color=BORDER,
             text_color=PRIMARY, hover_color=CARD_BG,
             font=ctk.CTkFont(family="PingFang SC", size=12),
-            command=self._ai_regenerate,
+            command=self._ai_regenerate, state="disabled",
         )
         self.ai_regenerate_btn.grid(row=0, column=1, padx=(4, 0), sticky="ew")
 
@@ -1399,7 +1406,7 @@ class WXSenderApp:
             self.ai_view, corner_radius=8, border_width=1,
             fg_color="#fafafa", border_color="#e8e8e8",
         )
-        self.kb_row.pack(fill="x", padx=12, pady=(0, 4))
+        # 不在初始化时 pack，由 _update_kb_row 统一决定是否显示，避免 pack→pack_forget 单帧闪烁
         self.kb_row.pack_propagate(False)
         self.kb_row.configure(height=26)
 
@@ -1415,7 +1422,7 @@ class WXSenderApp:
         self._update_kb_row()
 
         self.ai_status_label = ctk.CTkLabel(
-            self.ai_view, text="选中当前接管对象聊天后，读取会话并生成回复。",
+            self.ai_view, text="① 在 IM 窗口打开一个聊天  ② 点「读取并生成」",
             text_color="#8c8c8c", anchor="w",
             font=ctk.CTkFont(family="PingFang SC", size=11),
         )
@@ -1423,7 +1430,7 @@ class WXSenderApp:
 
         # 上下文折叠（spec v2）：常驻 100px 文本框 → 单行摘要，点击展开；高度让给草稿框
         self.ctx_summary_btn = ctk.CTkButton(
-            self.ai_view, text="▸ 尚未读取会话", height=26, corner_radius=8,
+            self.ai_view, text="▸ 点上方按钮读取当前对话", height=26, corner_radius=8,
             fg_color="transparent", hover_color=PILL_HOVER,
             text_color=TEXT_SUB, anchor="w",
             font=ctk.CTkFont(family="PingFang SC", size=11),
@@ -1438,11 +1445,6 @@ class WXSenderApp:
         )
         self.ai_context_box.configure(state="disabled")
 
-        ctk.CTkLabel(
-            self.ai_view, text="候选回复", anchor="w",
-            text_color="#333", font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
-        ).pack(fill="x", padx=14, pady=(4, 4))
-
         # 回复框 + 改写栏 + 工具/发送行。
         # 关键：底部的工具行、发送行用 side="bottom" 且 **先于** 回复框 pack，
         # 这样它们优先占据底部空间；回复框最后 pack（expand）吸收剩余高度。
@@ -1454,16 +1456,14 @@ class WXSenderApp:
         )
 
         # ── 发送行（最先 pin 到最底部）──
-        # ── 底部减负：1 主操作（确认发送）+ 1 溢出（⋯）──
-        # 原 4 个按钮（确认发送 / 存知识库 / 复制 / 清空）压成一行：
-        # 主操作 确认发送 撑满，低频项（复制 / 存入知识库 / 清空）收进 ⋯ 菜单。
+        # 主操作「发送」撑满，低频项（复制 / 存入知识库 / 清空）收进 ⋯ 菜单。
         send_row = ctk.CTkFrame(self.ai_view, fg_color="transparent")
         send_row.grid_columnconfigure(0, weight=1)
         self.ai_send_btn = ctk.CTkButton(
-            send_row, text="确认发送", height=38, corner_radius=10,
+            send_row, text="发送", height=38, corner_radius=10,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=13, weight="bold"),
-            command=self._ai_send_reply,
+            command=self._ai_send_reply, state="disabled",
         )
         self.ai_send_btn.grid(row=0, column=0, padx=(0, 6), sticky="ew")
         self.ai_overflow_btn = ctk.CTkButton(
@@ -1479,8 +1479,10 @@ class WXSenderApp:
         self.ai_save_btn = ctk.CTkButton(self.ai_view, text="存入知识库")
 
         # ── 一键改写（对话式微调）：预设 + 自定义 ──
+        # 改写工具栏仅当草稿有内容时才 pack 进布局，空状态不占空间（Jony Ive 建议）
         self.ai_refine_btns: list = []
-        refine_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        self._refine_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        refine_frame = self._refine_frame
         refine_frame.grid_columnconfigure((0, 1, 2), weight=1)
         for col, (key, label) in enumerate(
             (("formal", "更正式"), ("shorter", "更简短"), ("rephrase", "换个说法"))
@@ -1507,7 +1509,8 @@ class WXSenderApp:
         self.ai_undo_btn.grid(row=0, column=3, padx=(3, 0))
         self.ai_undo_btn.grid_remove()
 
-        custom_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        self._custom_frame = ctk.CTkFrame(self.ai_view, fg_color="transparent")
+        custom_frame = self._custom_frame
         custom_frame.grid_columnconfigure(0, weight=1)
         self.ai_refine_entry = ctk.CTkEntry(
             custom_frame, height=28, corner_radius=8, border_width=1,
@@ -1534,10 +1537,38 @@ class WXSenderApp:
         )
 
         send_row.pack(side="bottom", fill="x", padx=12, pady=(2, 10))
-        custom_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
-        refine_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 4))
+        # 改写工具栏初始不 pack：草稿为空时不占空间，有内容后由 _on_draft_modified 动态显示
         self.ai_source_caption.pack(side="bottom", fill="x", padx=14, pady=(0, 2))
         self.ai_reply_box.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+
+        # 草稿内容变化时动态显隐改写工具栏
+        self.ai_reply_box.bind("<<Modified>>", self._on_draft_modified)
+
+    def _on_draft_modified(self, _event=None):
+        """草稿内容变化时动态显隐改写工具栏（Jony Ive：空状态不暴露无法作用的控件）。"""
+        # CTkTextbox <<Modified>> 只在 flag 从 0→1 时触发一次，需手动重置才能持续响应
+        try:
+            self.ai_reply_box._textbox.edit_modified(False)
+        except Exception:
+            pass
+
+        has_content = bool(self.ai_reply_box.get("1.0", "end").strip())
+        refine_mapped = self._refine_frame.winfo_ismapped()
+
+        # 发送按钮与草稿内容同步（Luke Wroblewski：空草稿时按钮应 disabled，不能只靠 toast）
+        if hasattr(self, "ai_send_btn"):
+            self.ai_send_btn.configure(state="normal" if has_content else "disabled")
+
+        if has_content and not refine_mapped:
+            # 按 side="bottom" 顺序重新 pack：custom 先（靠近发送行），refine 后（靠近草稿框）
+            self._custom_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
+            self._refine_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 4))
+            # grid_remove 保留 grid 配置，re-pack refine_frame 时撤销按钮状态需同步
+            if hasattr(self, "ai_undo_btn") and len(self._draft_history) == 0:
+                self.ai_undo_btn.grid_remove()
+        elif not has_content and refine_mapped:
+            self._refine_frame.pack_forget()
+            self._custom_frame.pack_forget()
 
     def _update_kb_row(self):
         """根据当前配置刷新知识库状态行外观。"""
@@ -1547,41 +1578,50 @@ class WXSenderApp:
         if kb_mode == "none" and cfg.get("kb_enabled"):
             kb_mode = "local"
 
-        if kb_mode == "cloud":
-            scope = cfg.get("kb_scope", "")
-            scope_str = f" · {scope}" if scope else ""
-            self.kb_row.configure(fg_color=SURFACE, border_color=BORDER)
-            self.kb_row_label.configure(
-                text=f"✓ 云端知识库已启用{scope_str}", text_color=PRIMARY
-            )
-        elif kb_mode == "local" and cfg.get("kb_vault_path"):
-            vault_name = os.path.basename(cfg["kb_vault_path"]) or cfg["kb_vault_path"]
-            count_str = ""
-            if _kb_get_db_path and _sqlite3:
-                try:
-                    db = _kb_get_db_path()
-                    if os.path.exists(db):
-                        conn = _sqlite3.connect(db)
-                        try:
-                            vault = cfg["kb_vault_path"].rstrip("/")
-                            n = conn.execute(
-                                "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
-                                (vault + "/%",),
-                            ).fetchone()[0]
-                            count_str = f"  ({n} 条)"
-                        finally:
-                            conn.close()
-                except Exception:
-                    pass
-            self.kb_row.configure(fg_color=SURFACE, border_color=BORDER)
-            self.kb_row_label.configure(
-                text=f"✓ 知识库已启用 · {vault_name}{count_str}", text_color="#389e0d"
-            )
+        kb_enabled = kb_mode in ("cloud", "local") and (
+            kb_mode == "cloud" or cfg.get("kb_vault_path")
+        )
+
+        if kb_enabled:
+            # 知识库已启用：确保行在布局中可见
+            if not self.kb_row.winfo_ismapped() and hasattr(self, "_kb_row_anchor"):
+                self.kb_row.pack(
+                    after=self._kb_row_anchor,
+                    fill="x", padx=12, pady=(0, 4),
+                )
+            if kb_mode == "cloud":
+                scope = cfg.get("kb_scope", "")
+                scope_str = f" · {scope}" if scope else ""
+                self.kb_row.configure(fg_color=SURFACE, border_color=BORDER)
+                self.kb_row_label.configure(
+                    text=f"✓ 云端知识库已启用{scope_str}", text_color=PRIMARY
+                )
+            else:
+                vault_name = os.path.basename(cfg["kb_vault_path"]) or cfg["kb_vault_path"]
+                count_str = ""
+                if _kb_get_db_path and _sqlite3:
+                    try:
+                        db = _kb_get_db_path()
+                        if os.path.exists(db):
+                            conn = _sqlite3.connect(db)
+                            try:
+                                vault = cfg["kb_vault_path"].rstrip("/")
+                                n = conn.execute(
+                                    "SELECT COUNT(*) FROM kb_meta WHERE path LIKE ?",
+                                    (vault + "/%",),
+                                ).fetchone()[0]
+                                count_str = f"  ({n} 条)"
+                            finally:
+                                conn.close()
+                    except Exception:
+                        pass
+                self.kb_row.configure(fg_color=SURFACE, border_color=BORDER)
+                self.kb_row_label.configure(
+                    text=f"✓ 知识库已启用 · {vault_name}{count_str}", text_color="#389e0d"
+                )
         else:
-            self.kb_row.configure(fg_color=SURFACE, border_color=BORDER)
-            self.kb_row_label.configure(
-                text="知识库未启用 · 点击设置", text_color=TEXT_WEAK
-            )
+            # 知识库未启用：从布局移除，节省空间
+            self.kb_row.pack_forget()
 
     def _show_ai_settings(self):
         """弹出 AI 知识库设置窗口。"""
@@ -2080,7 +2120,9 @@ class WXSenderApp:
                 text="读取并生成", fg_color=PRIMARY, hover_color=PRIMARY_H,
                 state="normal", command=self._ai_read_and_generate,
             )
-            self.ai_regenerate_btn.configure(state="normal")
+            # 只有读取到消息后才能重新生成（Norman：可见的按钮应指向真实可执行的操作）
+            regen_state = "normal" if getattr(self, "_ai_messages", []) else "disabled"
+            self.ai_regenerate_btn.configure(state=regen_state)
 
     def _ai_cancel_generation(self):
         """用户点「取消生成」：置位取消标志，流式循环会杀掉子进程。"""
@@ -2109,7 +2151,7 @@ class WXSenderApp:
         self._ai_cancel = CancelToken()
         self._ai_set_generating_ui(True)
         self._ai_set_refine_enabled(False)
-        self._ai_set_status("正在调用 AI 生成回复…")
+        self._ai_set_status("正在生成回复…")
         # 先放生成动效（呼吸边框 + 「AI 正在生成」占位）；第一个流式块到达时
         # 再停掉动效、切换为逐块写入。等待期有反馈，有内容了就实时涌出。
         self._ai_stream_started = False
@@ -2153,6 +2195,7 @@ class WXSenderApp:
         self._ai_set_refine_enabled(True)
         # 用规范化后的完整文本替换流式累积内容（去重 / 启用「存入知识库」）
         self._ai_set_reply(reply)
+        self._on_draft_modified()
         # 记录本轮 AI 原稿（首次生成），发送时与实发文本对比沉淀风格信号
         self._ai_origin_draft = (reply or "").strip()
         kb_used = self._app_config.get("kb_mode", "none") != "none" or bool(
@@ -2161,13 +2204,14 @@ class WXSenderApp:
         self.ai_source_caption.configure(
             text=make_source_caption(len(self._ai_messages), kb_used)
         )
-        self._ai_set_status("AI 回复已生成，可改写或编辑后发送")
+        self._ai_set_status("回复已就绪，可微调后发送")
 
     def _ai_generation_cancelled(self):
         self._ai_generating = False
         self._ai_stop_loading_anim()
         self._ai_set_generating_ui(False)
         self._ai_set_refine_enabled(True)
+        self._on_draft_modified()
         self._ai_set_status("已取消生成")
 
     def _ai_generation_failed(self, message: str):
@@ -2259,6 +2303,7 @@ class WXSenderApp:
         self._ai_set_refine_enabled(True)
         if draft_before:
             self._ai_set_reply(draft_before)
+            self._on_draft_modified()
         self._ai_set_status("改写已取消")
 
     def _ai_refine_done(self, reply: str, draft_before: str = ""):
@@ -2268,6 +2313,7 @@ class WXSenderApp:
         self._ai_set_refine_enabled(True)
         self._push_draft_history(draft_before)
         self._ai_set_reply(reply)
+        self._on_draft_modified()
         self._ai_set_status("已改写，可继续微调或发送（可撤销）")
 
     def _ai_refine_failed(self, message: str):
@@ -2285,7 +2331,7 @@ class WXSenderApp:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(reply)
-        self._show_toast("已复制")
+        self._show_toast("已复制到剪贴板")
 
     def _push_draft_history(self, draft: str):
         """压栈草稿历史并刷新撤销按钮可见性。"""
@@ -2302,17 +2348,19 @@ class WXSenderApp:
         if prev is None:
             return "break"
         self._ai_set_reply(prev)
-        self._show_toast("已撤销改写")
+        self._on_draft_modified()
+        self._show_toast("已恢复上一版")
         if len(self._draft_history) == 0:
             self.ai_undo_btn.grid_remove()
         return "break"
 
     def _ai_clear_reply(self):
         self._ai_set_reply("")
+        self._on_draft_modified()
         self._clear_draft_history()
         if hasattr(self, "ai_source_caption"):
             self.ai_source_caption.configure(text="")
-        self._ai_set_status("候选回复已清空")
+        self._ai_set_status("草稿已清空")
 
     def _insert_phrase_to_draft(self, phrase):
         """把话术文本插入草稿台（切到草稿视图，追加到草稿框末尾，供编辑后发送）。
@@ -2635,10 +2683,12 @@ class WXSenderApp:
         """切换吸附 / 脱离。脱离后面板停在原地、用户可拖到任意屏；重新吸附立即回贴。"""
         self._snap_enabled = not self._snap_enabled
         if self._snap_enabled:
-            self.snap_btn.configure(text="⊙ 贴合")
+            # 现在已开启跟随 → 下次点击将「固定」
+            self.snap_btn.configure(text="○ 固定")
             self._snap_filter.reset()  # 强制下一次轮询立即重新定位
         else:
-            self.snap_btn.configure(text="○ 脱离")
+            # 现在已固定 → 下次点击将「跟随」
+            self.snap_btn.configure(text="⊙ 跟随")
 
     def _poll_snap(self):
         """
@@ -3116,11 +3166,11 @@ class WXSenderApp:
         body = "\n".join(lines) if lines else "没有可检查的客户端。"
         if problems:
             self._show_warning(
-                "AX 结构自检发现问题（客户端可能已更新）：\n\n" + body +
+                "诊断发现问题（客户端可能已更新）：\n\n" + body +
                 "\n\n若发送/读取失效，请用 tools/explore_ax.py 重新探测对应客户端的 AX 树。"
             )
         else:
-            self._show_info("AX 结构自检", "全部正常：\n\n" + body)
+            self._show_info("连接诊断结果", "全部正常：\n\n" + body)
 
     def _startup_self_check(self):
         """
@@ -3159,7 +3209,7 @@ class WXSenderApp:
         hint = {
             probes.STATUS_NO_PERMISSION: "需授予辅助功能权限",
             probes.STATUS_NO_WINDOW: "未检测到窗口",
-            probes.STATUS_DEGRADED: "AX 结构异常，请运行自检",
+            probes.STATUS_DEGRADED: "连接异常，请运行诊断",
         }.get(result.status, "自检异常")
         try:
             self._set_status_text(f"{result.display_name}·{hint}")
@@ -3380,7 +3430,7 @@ class WXSenderApp:
         ).pack(side="right", padx=(4, 12), pady=10)
 
         ctk.CTkButton(
-            footer, text="确认发送", width=96, height=32, corner_radius=8,
+            footer, text="发送", width=96, height=32, corner_radius=8,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family="PingFang SC", size=12, weight="bold"),
             command=confirm_send,
@@ -3401,7 +3451,9 @@ class WXSenderApp:
         def _restore_send_btn():
             self._sending = False
             if send_btn:
-                send_btn.configure(state="normal", text="确认发送")
+                # 让 _on_draft_modified 根据草稿实际内容决定 state，避免竞态（Norman / Ive）
+                send_btn.configure(text="发送")
+                self._on_draft_modified()
 
         def send_task():
             try:
