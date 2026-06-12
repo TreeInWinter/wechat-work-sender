@@ -26,8 +26,10 @@ _DEFAULTS: dict = {
     "kb_scope": "",     # 云端模式的查询范围（服务名/模块名），可选
     # UI 密度："comfortable"（默认，间距宽松）| "compact"（紧凑，一屏多塞话术）
     "density": "comfortable",
-    # 成功发送计数：每 10 次成功发送后提示一次「支持作者」
+    # 成功发送计数：免费用户每 10 次成功发送后提示一次「支持作者」
     "donation_send_count": 0,
+    # 本机支持状态。None 表示未登记；登记后由 gui_panel 写入档位、渠道和提示日期。
+    "donation_profile": None,
 }
 
 

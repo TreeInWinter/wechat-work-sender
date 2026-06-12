@@ -15,7 +15,8 @@ import threading
 import re
 import copy
 import sys
-from datetime import datetime
+import calendar
+from datetime import date, datetime
 
 import customtkinter as ctk
 import tkinter as tk
@@ -190,7 +191,18 @@ DEFAULT_DATA_FILE = os.path.join(SCRIPT_DIR, "phrases.json")
 DATA_FILE = os.path.join(APP_SUPPORT_DIR, "phrases.json") if getattr(sys, "frozen", False) else DEFAULT_DATA_FILE
 DONATION_QR_RELATIVE_PATH = "assets/donation-wechat.jpg"
 DONATION_SEND_COUNT_KEY = "donation_send_count"
+DONATION_PROFILE_KEY = "donation_profile"
 DONATION_PROMPT_INTERVAL = 10
+DONATION_MONTHLY_INTERVAL_MONTHS = 1
+DONATION_TIER_FREE = "free"
+DONATION_TIER_UNDER_10 = "under_10"
+DONATION_TIER_AT_LEAST_10 = "at_least_10"
+DONATION_MONTHLY_TIERS = {DONATION_TIER_UNDER_10, DONATION_TIER_AT_LEAST_10}
+DONATION_TIER_LABELS = {
+    DONATION_TIER_FREE: "免费使用中",
+    DONATION_TIER_UNDER_10: "已支持（10元以下）",
+    DONATION_TIER_AT_LEAST_10: "已支持（10元及以上）",
+}
 
 
 def app_resource_path(relative_path: str) -> str:
@@ -214,6 +226,119 @@ def next_donation_send_count(current_count) -> tuple[int, bool]:
         count = 0
     count = max(0, count) + 1
     return count, (count % DONATION_PROMPT_INTERVAL == 0)
+
+
+def _coerce_date(value=None) -> date:
+    if value is None:
+        return datetime.now().date()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raise TypeError(f"Unsupported date value: {value!r}")
+
+
+def _parse_iso_date(value) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _add_months(day: date, months: int) -> date:
+    month_index = day.month - 1 + max(1, int(months))
+    year = day.year + month_index // 12
+    month = month_index % 12 + 1
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day.day, last_day))
+
+
+def _normal_donation_profile(profile) -> dict:
+    if not isinstance(profile, dict):
+        return {"tier": DONATION_TIER_FREE}
+    tier = profile.get("tier", DONATION_TIER_FREE)
+    if tier not in {DONATION_TIER_FREE, *DONATION_MONTHLY_TIERS}:
+        tier = DONATION_TIER_FREE
+    normalized = dict(profile)
+    normalized["tier"] = tier
+    return normalized
+
+
+def donation_support_registration_update(tier: str, channel: str, now=None) -> dict:
+    """记录本机用户主动登记的支持档位；个人收款码无法自动回传金额。"""
+    if tier not in DONATION_MONTHLY_TIERS:
+        raise ValueError(f"Unsupported donation tier: {tier!r}")
+    today = _coerce_date(now).isoformat()
+    return {
+        DONATION_PROFILE_KEY: {
+            "tier": tier,
+            "channel": channel or "wechat",
+            "registered_at": today,
+            "last_donation_at": today,
+            "last_prompted_at": today,
+            "prompt_interval_months": DONATION_MONTHLY_INTERVAL_MONTHS,
+        }
+    }
+
+
+def donation_tier_label(tier: str) -> str:
+    return DONATION_TIER_LABELS.get(tier, DONATION_TIER_LABELS[DONATION_TIER_FREE])
+
+
+def donation_next_prompt_date(profile) -> date | None:
+    profile = _normal_donation_profile(profile)
+    if profile.get("tier") not in DONATION_MONTHLY_TIERS:
+        return None
+    anchor = (
+        _parse_iso_date(profile.get("last_prompted_at"))
+        or _parse_iso_date(profile.get("last_donation_at"))
+        or _parse_iso_date(profile.get("registered_at"))
+    )
+    if not anchor:
+        return None
+    try:
+        months = int(profile.get("prompt_interval_months", DONATION_MONTHLY_INTERVAL_MONTHS))
+    except (TypeError, ValueError):
+        months = DONATION_MONTHLY_INTERVAL_MONTHS
+    return _add_months(anchor, months)
+
+
+def donation_status_text(profile, now=None) -> str:
+    profile = _normal_donation_profile(profile)
+    tier = profile.get("tier")
+    if tier in DONATION_MONTHLY_TIERS:
+        next_date = donation_next_prompt_date(profile)
+        if next_date:
+            return f"{donation_tier_label(tier)} · 下次约 {next_date.isoformat()} 提醒"
+        return f"{donation_tier_label(tier)} · 每月提醒一次"
+    return f"{DONATION_TIER_LABELS[DONATION_TIER_FREE]} · 每 {DONATION_PROMPT_INTERVAL} 次发送提醒一次"
+
+
+def next_donation_prompt_state(config: dict | None, now=None) -> tuple[dict, bool]:
+    """成功发送后的捐赠提示策略，返回要持久化的更新和是否弹窗。"""
+    config = config or {}
+    today = _coerce_date(now)
+    count, free_should_prompt = next_donation_send_count(config.get(DONATION_SEND_COUNT_KEY, 0))
+    updates = {DONATION_SEND_COUNT_KEY: count}
+
+    profile = _normal_donation_profile(config.get(DONATION_PROFILE_KEY))
+    if profile.get("tier") not in DONATION_MONTHLY_TIERS:
+        return updates, free_should_prompt
+
+    next_prompt = donation_next_prompt_date(profile)
+    should_prompt = next_prompt is None or today >= next_prompt
+    if should_prompt:
+        updated_profile = dict(profile)
+        updated_profile["last_prompted_at"] = today.isoformat()
+        updated_profile["prompt_interval_months"] = DONATION_MONTHLY_INTERVAL_MONTHS
+        updates[DONATION_PROFILE_KEY] = updated_profile
+    return updates, should_prompt
 
 
 # ============================================================
@@ -3603,6 +3728,15 @@ class WXSenderApp:
         _AlertDialog(self.root, title, message, level="info").wait()
         self.root.attributes("-topmost", True)
 
+    def _save_donation_support(self, tier: str, channel: str = "wechat") -> bool:
+        updates = donation_support_registration_update(tier, channel)
+        self._app_config.update(updates)
+        try:
+            save_config(updates)
+        except Exception:
+            return False
+        return True
+
     def _show_donation_panel(self):
         """支持作者面板：低频入口 + 微信收款码，保持主流程干净。"""
         self.root.attributes("-topmost", False)
@@ -3610,7 +3744,7 @@ class WXSenderApp:
         win.withdraw()
         win.title("支持作者")
         win.resizable(False, False)
-        self._center_on_root(win, 360, 590)
+        self._center_on_root(win, 360, 660)
         win.lift()
         win.focus_force()
         win.grab_set()
@@ -3647,6 +3781,13 @@ class WXSenderApp:
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
         ).pack(fill="x", padx=28, pady=(18, 10))
 
+        ctk.CTkLabel(
+            body,
+            text=donation_status_text(self._app_config.get(DONATION_PROFILE_KEY)),
+            text_color=TEXT_WEAK, wraplength=300, justify="center",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+        ).pack(fill="x", padx=28, pady=(0, 10))
+
         card = ctk.CTkFrame(
             body, corner_radius=14, fg_color=SURFACE,
             border_width=1, border_color=BORDER,
@@ -3654,7 +3795,7 @@ class WXSenderApp:
         card.pack(fill="x", padx=24, pady=(0, 14))
 
         qr_path = app_resource_path(DONATION_QR_RELATIVE_PATH)
-        qr_image = make_contained_image(qr_path, size=(260, 354))
+        qr_image = make_contained_image(qr_path, size=(240, 328))
         win._donation_qr_image = qr_image
         if qr_image:
             ctk.CTkLabel(card, text="", image=qr_image).pack(padx=14, pady=14)
@@ -3666,17 +3807,42 @@ class WXSenderApp:
 
         ctk.CTkLabel(
             body,
-            text="微信扫一扫 · 感谢支持",
+            text="微信扫一扫 · 个人收款码不会自动回传金额，扫码后请在下方登记档位。",
             text_color=TEXT_WEAK,
+            wraplength=300,
+            justify="center",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
         ).pack(fill="x", padx=24, pady=(0, 10))
 
+        def record_and_close(tier: str):
+            if not self._save_donation_support(tier):
+                self._show_warning("支持状态保存失败，请稍后再试")
+                return
+            on_close()
+            self._show_toast("已记录支持状态，每月提醒一次")
+
         ctk.CTkButton(
-            body, text="完成", height=34, corner_radius=8,
+            body, text="我已支持（10元以下）", height=32, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color=BORDER_WEAK,
+            text_color=TEXT_MAIN, hover_color=HOVER_BG,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            command=lambda: record_and_close(DONATION_TIER_UNDER_10),
+        ).pack(fill="x", padx=24, pady=(0, 8))
+
+        ctk.CTkButton(
+            body, text="我已支持（10元及以上）", height=34, corner_radius=8,
             fg_color=PRIMARY, hover_color=PRIMARY_H,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            command=lambda: record_and_close(DONATION_TIER_AT_LEAST_10),
+        ).pack(fill="x", padx=24, pady=(0, 8))
+
+        ctk.CTkButton(
+            body, text="完成", height=34, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color=BORDER_WEAK,
+            text_color=TEXT_SUB, hover_color=HOVER_BG,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
             command=on_close,
-        ).pack(fill="x", padx=24, pady=(0, 18))
+        ).pack(fill="x", padx=24, pady=(0, 16))
 
     # ── 稳健性自检 ───────────────────────────────────────────────
 
@@ -4032,12 +4198,10 @@ class WXSenderApp:
         def _after_send_success():
             self.status_dot.configure(text_color=DOT_OK)
             self._show_toast("已发送")
-            count, should_prompt = next_donation_send_count(
-                self._app_config.get(DONATION_SEND_COUNT_KEY, 0)
-            )
-            self._app_config[DONATION_SEND_COUNT_KEY] = count
+            donation_updates, should_prompt = next_donation_prompt_state(self._app_config)
+            self._app_config.update(donation_updates)
             try:
-                save_config({DONATION_SEND_COUNT_KEY: count})
+                save_config(donation_updates)
             except Exception:
                 pass
             _restore_send_btn()
