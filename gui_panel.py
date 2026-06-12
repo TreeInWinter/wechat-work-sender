@@ -232,8 +232,10 @@ class _PopupMenu:
 
     # ── 弹出 ──────────────────────────────────────────────────
     def show(self, anchor):
-        # 持有 dismiss 引用供子项和全局绑定共享
-        _cleanup: list = [None]   # [(<root-Button-1 id>, <root-Escape id>)]
+        # 嵌入式覆盖层方案（不用 Toplevel）：把弹出菜单作为 CTkFrame 用 place()
+        # 直接覆盖在主窗口上，彻底绕开 macOS overrideredirect 窗口的鼠标事件
+        # 拦截问题（topmost 主窗口会截断指向独立 Toplevel 的点击）。
+        _cleanup: list = [None]   # [(root-Button-1 id, root-Escape id)]
 
         def _dismiss(_e=None):
             ids = _cleanup[0]
@@ -248,61 +250,60 @@ class _PopupMenu:
                 except Exception:
                     pass
             try:
-                win.destroy()
+                popup.destroy()
             except Exception:
                 pass
 
-        win = tk.Toplevel(self._root)
-        win.overrideredirect(True)
-        win.configure(bg=SURFACE)
-        win.attributes("-topmost", True)
-
-        # ── 主容器 ─────────────────────────────────────────
-        outer = ctk.CTkFrame(
-            win, fg_color=SURFACE, corner_radius=self.RADIUS,
-            border_width=1, border_color="#D1D9E6",
+        # width 必须在构造时传入（CTkFrame.place 禁止运行时设置）
+        popup = ctk.CTkFrame(
+            self._root, fg_color=SURFACE, corner_radius=self.RADIUS,
+            border_width=1, border_color="#D1D9E6", width=self.W,
         )
-        outer.pack(fill="both", expand=True)
-        ctk.CTkFrame(outer, height=self.PY, fg_color="transparent").pack()
+        ctk.CTkFrame(popup, height=self.PY, fg_color="transparent").pack()
 
         for item in self._items:
             t = item["t"]
             if t == "sep":
-                ctk.CTkFrame(outer, height=1, fg_color=BORDER, corner_radius=0).pack(
+                ctk.CTkFrame(popup, height=1, fg_color=BORDER, corner_radius=0).pack(
                     fill="x", padx=10, pady=3,
                 )
             elif t == "foot":
                 ctk.CTkLabel(
-                    outer, text=item["text"], text_color=TEXT_WEAK,
+                    popup, text=item["text"], text_color=TEXT_WEAK,
                     anchor="w", wraplength=self.W - 28,
                     font=ctk.CTkFont(family="PingFang SC", size=10),
                 ).pack(fill="x", padx=14, pady=(2, 8))
             else:
-                self._build_item(outer, item, _dismiss)
+                self._build_item(popup, item, _dismiss)
 
-        ctk.CTkFrame(outer, height=self.PY, fg_color="transparent").pack()
+        ctk.CTkFrame(popup, height=self.PY, fg_color="transparent").pack()
 
-        # ── 定位：右对齐锚点，贴近按钮下方 ────────────────
-        win.update_idletasks()
-        h = outer.winfo_reqheight()
+        # ── 定位：根窗口相对坐标，右对齐锚点下方 ────────────
+        popup.update_idletasks()
 
-        ax = anchor.winfo_rootx() + anchor.winfo_width() - self.W
-        ay = anchor.winfo_rooty() + anchor.winfo_height() + 4
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        ax = max(4, min(ax, sw - self.W - 4))
-        if ay + h > sh - 20:
-            ay = anchor.winfo_rooty() - h - 4
+        rx = self._root.winfo_rootx()
+        ry = self._root.winfo_rooty()
+        rw = self._root.winfo_width()
+        rh = self._root.winfo_height()
+        ph = popup.winfo_reqheight()
 
-        win.geometry(f"{self.W}x{h}+{ax}+{ay}")
-        win.lift()
+        px = anchor.winfo_rootx() + anchor.winfo_width() - self.W - rx
+        py = anchor.winfo_rooty() + anchor.winfo_height() + 4 - ry
+        px = max(2, min(px, rw - self.W - 2))
+        if py + ph > rh - 4:
+            py = anchor.winfo_rooty() - ph - 4 - ry
 
-        # ── 关闭：点击弹窗外部 / Escape ────────────────────
-        # macOS overrideredirect 窗口不持有键盘焦点，无法用 FocusOut。
-        # 延迟 100ms 再绑，避免「开菜单的那次点击」被立即判定为外部点击。
+        popup.place(x=px, y=py)
+        popup.lift()
+
+        # ── 关闭：点击覆盖层外部 / Escape ──────────────────
+        # 延迟 100ms 绑定，避免「打开菜单的那次点击」被立即判定为外部点击。
         def _outside_click(e):
             try:
-                if not (win.winfo_rootx() <= e.x_root <= win.winfo_rootx() + win.winfo_width()
-                        and win.winfo_rooty() <= e.y_root <= win.winfo_rooty() + win.winfo_height()):
+                pax = self._root.winfo_rootx() + popup.winfo_x()
+                pay = self._root.winfo_rooty() + popup.winfo_y()
+                if not (pax <= e.x_root <= pax + popup.winfo_width()
+                        and pay <= e.y_root <= pay + popup.winfo_height()):
                     _dismiss()
             except Exception:
                 _dismiss()
