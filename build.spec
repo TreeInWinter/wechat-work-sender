@@ -2,7 +2,7 @@
 
 from PyInstaller.utils.hooks import collect_all
 
-datas = [("phrases.json", ".")]
+datas = [("phrases.json", "."), ("assets/donation-wechat.jpg", "assets")]
 binaries = []
 hiddenimports = []
 

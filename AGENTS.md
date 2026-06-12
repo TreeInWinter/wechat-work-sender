@@ -234,6 +234,13 @@ docs/
    - 话术卡片右侧红框按钮墙继续收敛：每条卡片只保留一个轻量 `⋯`，单条「发送 / 插入草稿 / 编辑」进入卡片菜单；`⌘1-9` 继续保留快速发送。
    - 验证：`.venv/bin/python -m py_compile gui_panel.py sender.py`、`.venv/bin/python -m pytest -q` 通过，结果为 `182 passed, 1 skipped`；窗口实例化 smoke 验证主按钮状态切换与话术页控件存在；`screencapture` 对 AI 草稿台与话术页完成图片级视觉验收。
 
+13. **支持作者 / 微信收款码（2026-06-12）**：右上 `⋯` 菜单新增「支持作者…」，弹出 iOS 风格二维码面板。
+   - 收款码资产固定复制到 `assets/donation-wechat.jpg`，不要依赖微信临时文件路径。
+   - `app_resource_path()` 兼容源码运行和 PyInstaller `_MEIPASS`；`make_contained_image()` 用于完整等比展示二维码，不裁剪。
+   - `build.spec` 必须包含 `("assets/donation-wechat.jpg", "assets")`，否则打包后的 `.app` 找不到收款码。
+   - 验证：新增 `ResourcePathTests` 覆盖资源路径和二维码存在；`.venv/bin/python -m pytest -q` 结果为 `184 passed, 1 skipped`；`screencapture` 视觉验收确认「支持作者」面板里二维码真实可见。
+   - 发送触发策略：`donation_send_count` 记录成功发送次数，每成功发送 10 次后延迟弹出一次「支持作者」面板；失败发送不计数、不弹窗。`next_donation_send_count()` 有单测覆盖 10/20 次触发。
+
 ---
 
 ## 常用命令

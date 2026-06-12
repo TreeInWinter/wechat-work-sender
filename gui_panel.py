@@ -188,6 +188,15 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_SUPPORT_DIR = os.path.expanduser("~/Library/Application Support/WechatWorkSender")
 DEFAULT_DATA_FILE = os.path.join(SCRIPT_DIR, "phrases.json")
 DATA_FILE = os.path.join(APP_SUPPORT_DIR, "phrases.json") if getattr(sys, "frozen", False) else DEFAULT_DATA_FILE
+DONATION_QR_RELATIVE_PATH = "assets/donation-wechat.jpg"
+DONATION_SEND_COUNT_KEY = "donation_send_count"
+DONATION_PROMPT_INTERVAL = 10
+
+
+def app_resource_path(relative_path: str) -> str:
+    """返回源码运行 / PyInstaller 运行均可访问的项目资源路径。"""
+    base_dir = getattr(sys, "_MEIPASS", SCRIPT_DIR)
+    return os.path.join(base_dir, relative_path)
 
 VARIABLE_PATTERN = re.compile(r"\{\{\s*([^{}\s]+)\s*\}\}")
 SYSTEM_VARIABLES = {
@@ -195,6 +204,16 @@ SYSTEM_VARIABLES = {
     "时间": lambda: datetime.now().strftime("%H:%M"),
     "星期": lambda: "一二三四五六日"[datetime.now().weekday()],
 }
+
+
+def next_donation_send_count(current_count) -> tuple[int, bool]:
+    """成功发送计数 +1；每 10 次返回 should_prompt=True。"""
+    try:
+        count = int(current_count)
+    except (TypeError, ValueError):
+        count = 0
+    count = max(0, count) + 1
+    return count, (count % DONATION_PROMPT_INTERVAL == 0)
 
 
 # ============================================================
@@ -554,6 +573,27 @@ def make_thumbnail(path: str, size: tuple = (72, 54)):
         img_rgba = img.convert("RGBA") if img.mode != "RGBA" else img
         new.paste(img_rgba, ((tw - img_rgba.width) // 2, (th - img_rgba.height) // 2))
         return ctk.CTkImage(light_image=new, dark_image=new, size=size)
+    except Exception:
+        return None
+
+
+def make_contained_image(path: str, size: tuple = (260, 354)):
+    """等比完整显示图片，不裁剪；用于二维码等不可截断的内容。"""
+    try:
+        if not path or not isinstance(path, str):
+            return None
+        from PIL import Image as PILImage
+        expanded = os.path.expanduser(path)
+        if not os.path.exists(expanded):
+            return None
+        img = PILImage.open(expanded)
+        img.thumbnail((size[0] * 3, size[1] * 3), PILImage.LANCZOS)
+        canvas = PILImage.new("RGBA", size, (255, 255, 255, 255))
+        img_rgba = img.convert("RGBA") if img.mode != "RGBA" else img
+        img_rgba.thumbnail(size, PILImage.LANCZOS)
+        canvas.paste(img_rgba, ((size[0] - img_rgba.width) // 2,
+                                (size[1] - img_rgba.height) // 2))
+        return ctk.CTkImage(light_image=canvas, dark_image=canvas, size=size)
     except Exception:
         return None
 
@@ -1677,6 +1717,8 @@ class WXSenderApp:
          .add_separator()
          .add_command("导出话术库…",        self._export_phrases)
          .add_command("导入话术库…",        self._import_phrases)
+         .add_separator()
+         .add_command("支持作者…",          self._show_donation_panel)
          .add_separator()
          .add_command("权限引导…",          self._show_permission_guide)
          .add_command("诊断连接…",          self._run_self_check_async)
@@ -3561,6 +3603,81 @@ class WXSenderApp:
         _AlertDialog(self.root, title, message, level="info").wait()
         self.root.attributes("-topmost", True)
 
+    def _show_donation_panel(self):
+        """支持作者面板：低频入口 + 微信收款码，保持主流程干净。"""
+        self.root.attributes("-topmost", False)
+        win = ctk.CTkToplevel(self.root)
+        win.withdraw()
+        win.title("支持作者")
+        win.resizable(False, False)
+        self._center_on_root(win, 360, 590)
+        win.lift()
+        win.focus_force()
+        win.grab_set()
+        win.attributes("-topmost", True)
+
+        def on_close():
+            win.destroy()
+            self.root.attributes("-topmost", True)
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=HEADER_BG)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        ctk.CTkFrame(win, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
+        ctk.CTkLabel(
+            header, text="支持作者", text_color=TEXT_MAIN,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+        ).pack(side="left", padx=14, pady=12)
+        ctk.CTkButton(
+            header, text="✕", width=32, height=32, corner_radius=8,
+            fg_color="transparent", hover_color=PILL_HOVER,
+            text_color=TEXT_SUB, font=ctk.CTkFont(size=14),
+            command=on_close,
+        ).pack(side="right", padx=8)
+
+        body = ctk.CTkFrame(win, fg_color=APP_BG, corner_radius=0)
+        body.pack(fill="both", expand=True)
+
+        ctk.CTkLabel(
+            body,
+            text="如果秒回SideKick帮你省下了时间，欢迎随手支持一下。",
+            text_color=TEXT_SUB, wraplength=300, justify="center",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        ).pack(fill="x", padx=28, pady=(18, 10))
+
+        card = ctk.CTkFrame(
+            body, corner_radius=14, fg_color=SURFACE,
+            border_width=1, border_color=BORDER,
+        )
+        card.pack(fill="x", padx=24, pady=(0, 14))
+
+        qr_path = app_resource_path(DONATION_QR_RELATIVE_PATH)
+        qr_image = make_contained_image(qr_path, size=(260, 354))
+        win._donation_qr_image = qr_image
+        if qr_image:
+            ctk.CTkLabel(card, text="", image=qr_image).pack(padx=14, pady=14)
+        else:
+            ctk.CTkLabel(
+                card, text="收款码加载失败", text_color=DOT_ERR,
+                font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            ).pack(padx=14, pady=80)
+
+        ctk.CTkLabel(
+            body,
+            text="微信扫一扫 · 感谢支持",
+            text_color=TEXT_WEAK,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+        ).pack(fill="x", padx=24, pady=(0, 10))
+
+        ctk.CTkButton(
+            body, text="完成", height=34, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            command=on_close,
+        ).pack(fill="x", padx=24, pady=(0, 18))
+
     # ── 稳健性自检 ───────────────────────────────────────────────
 
     def _run_self_check_async(self):
@@ -3912,12 +4029,25 @@ class WXSenderApp:
                 # 让 _on_draft_modified 根据草稿实际内容决定语义，避免竞态（Norman / Ive）
                 self._on_draft_modified()
 
+        def _after_send_success():
+            self.status_dot.configure(text_color=DOT_OK)
+            self._show_toast("已发送")
+            count, should_prompt = next_donation_send_count(
+                self._app_config.get(DONATION_SEND_COUNT_KEY, 0)
+            )
+            self._app_config[DONATION_SEND_COUNT_KEY] = count
+            try:
+                save_config({DONATION_SEND_COUNT_KEY: count})
+            except Exception:
+                pass
+            _restore_send_btn()
+            if should_prompt:
+                self.root.after(450, self._show_donation_panel)
+
         def send_task():
             try:
                 send_blocks_with_client(client, blocks)
-                self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_OK))
-                self.root.after(0, lambda: self._show_toast("已发送"))
-                self.root.after(0, _restore_send_btn)
+                self.root.after(0, _after_send_success)
             except UnsupportedClientAction as e:
                 msg = str(e)
                 self.root.after(0, lambda: self.status_dot.configure(text_color=DOT_WAIT))

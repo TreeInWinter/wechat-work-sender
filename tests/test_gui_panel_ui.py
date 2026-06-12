@@ -170,6 +170,38 @@ class SourceCaptionTests(unittest.TestCase):
         )
 
 
+class ResourcePathTests(unittest.TestCase):
+    def test_app_resource_path_resolves_project_files(self):
+        path = gui_panel.app_resource_path("phrases.json")
+        self.assertTrue(path.endswith("phrases.json"))
+        self.assertTrue(path.startswith(gui_panel.SCRIPT_DIR))
+
+    def test_donation_qr_asset_is_bundled_resource(self):
+        path = gui_panel.app_resource_path(gui_panel.DONATION_QR_RELATIVE_PATH)
+        self.assertTrue(path.endswith("assets/donation-wechat.jpg"))
+        self.assertTrue(gui_panel.os.path.exists(path))
+
+
+class DonationPromptTests(unittest.TestCase):
+    def test_prompts_every_tenth_successful_send(self):
+        cases = [
+            (0, 1, False),
+            (8, 9, False),
+            (9, 10, True),
+            (10, 11, False),
+            (19, 20, True),
+        ]
+        for current, expected_next, expected_prompt in cases:
+            with self.subTest(current=current):
+                next_count, should_prompt = gui_panel.next_donation_send_count(current)
+                self.assertEqual(next_count, expected_next)
+                self.assertEqual(should_prompt, expected_prompt)
+
+    def test_invalid_saved_count_starts_from_zero(self):
+        self.assertEqual(gui_panel.next_donation_send_count("bad"), (1, False))
+        self.assertEqual(gui_panel.next_donation_send_count(None), (1, False))
+
+
 class FilterPhrasesTests(unittest.TestCase):
     PHRASES = {
         "问候语": ["您好，我是客服", "早上好"],
