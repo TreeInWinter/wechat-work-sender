@@ -1239,7 +1239,11 @@ def filter_phrases(phrases: dict, current_group: str, query: str) -> list[tuple]
 
 
 class PhraseCard(ctk.CTkFrame):
-    """单条话术卡片：左侧文本 + 右侧发送按钮"""
+    """单条话术卡片：左侧内容 + 右侧更多菜单。
+
+    iOS 式收敛：列表里不重复铺开「编辑 / 插入 / 发送」三颗按钮，避免按钮墙。
+    常用快速发送保留在 ⌘1-9；单条低频操作收进本卡片的 ⋯ 菜单。
+    """
 
     NORMAL_BG      = "white"
     SELECTED_BG    = ACCENT_SOFT
@@ -1275,47 +1279,36 @@ class PhraseCard(ctk.CTkFrame):
         self._label = ctk.CTkLabel(
             self,
             text=prefix + ("[图] " if has_img else "") + preview + suffix,
-            wraplength=200,
+            wraplength=300,
             justify="left", anchor="w",
             text_color=TEXT_DARK,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
         )
-        self._label.grid(row=0, column=0, padx=(10, 4), pady=pad_y, sticky="ew")
+        self._label.grid(row=0, column=0, padx=(10, 6), pady=pad_y, sticky="ew")
 
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=0, column=1, padx=(0, 6), pady=pad_y)
-
-        if self._on_edit:
-            ctk.CTkButton(
-                btn_frame, text="编辑", width=36, height=22,
-                corner_radius=8, fg_color="transparent",
-                border_width=1, border_color=BORDER_WEAK,
-                text_color="#888", hover_color=HOVER_BG,
-                font=ctk.CTkFont(size=11),
-                command=self._on_edit,
-            ).pack(side="top", pady=(0, 3))
-
-        if self._on_insert:
-            ctk.CTkButton(
-                btn_frame, text="插入", width=44, height=22,
-                corner_radius=8, fg_color="transparent",
-                border_width=1, border_color=BORDER,
-                text_color=PRIMARY, hover_color=CARD_BG,
-                font=ctk.CTkFont(size=11),
-                command=self._on_insert,
-            ).pack(side="top", pady=(0, 3))
-
-        self._send_btn = ctk.CTkButton(
-            btn_frame, text="发送", width=44, height=26,
-            corner_radius=8, fg_color=CARD_BG,
-            text_color=PRIMARY, hover_color="#C7D7F8",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            command=self._on_send,
+        self._menu_btn = ctk.CTkButton(
+            self, text="⋯", width=34, height=28,
+            corner_radius=8, fg_color="transparent",
+            border_width=1, border_color=BORDER,
+            text_color=TEXT_SUB, hover_color=PILL_HOVER,
+            font=ctk.CTkFont(size=16, weight="bold"),
+            command=self._show_card_menu,
         )
-        self._send_btn.pack(side="top")
+        self._menu_btn.grid(row=0, column=1, padx=(0, 8), pady=pad_y)
 
         self._label.bind("<Button-1>", lambda e: self._on_select(self))
         self.bind("<Button-1>", lambda e: self._on_select(self))
+
+    def _show_card_menu(self):
+        self._on_select(self)
+        menu = _PopupMenu(self.winfo_toplevel())
+        menu.add_command("发送", self._on_send)
+        if self._on_insert:
+            menu.add_command("插入草稿", self._on_insert)
+        if self._on_edit:
+            menu.add_separator()
+            menu.add_command("编辑", self._on_edit)
+        menu.show(self._menu_btn)
 
     @property
     def text(self) -> str:
@@ -1332,13 +1325,13 @@ class PhraseCard(ctk.CTkFrame):
         if selected:
             self.configure(fg_color=self.SELECTED_BG, border_color=self.SELECTED_BORDER)
             self._label.configure(text_color=PRIMARY)
-            self._send_btn.configure(fg_color=PRIMARY, text_color="white",
-                                      hover_color=PRIMARY_H)
+            self._menu_btn.configure(border_color=PRIMARY, text_color=PRIMARY,
+                                     hover_color=CARD_BG)
         else:
             self.configure(fg_color=self.NORMAL_BG, border_color=BORDER_WEAK)
             self._label.configure(text_color=TEXT_DARK)
-            self._send_btn.configure(fg_color=CARD_BG, text_color=PRIMARY,
-                                      hover_color="#C7D7F8")
+            self._menu_btn.configure(border_color=BORDER, text_color=TEXT_SUB,
+                                     hover_color=PILL_HOVER)
 
 
 # ============================================================
@@ -1692,14 +1685,35 @@ class WXSenderApp:
 
     def _show_phrase_manage_menu(self):
         """话术页管理菜单：低频/破坏性操作收起，主界面保持干净。"""
-        selected_state = "normal" if self._selected_card is not None else "disabled"
-        (_PopupMenu(self.root)
-         .add_command("新建分组", self._add_group)
-         .add_command("重命名当前分组", self._rename_group)
-         .add_command("删除当前分组", self._delete_group)
-         .add_separator()
-         .add_command("删除选中话术", self._delete_phrase, state=selected_state)
-         .show(self.phrase_manage_btn))
+        selected = self._selected_card
+        selected_state = "normal" if selected is not None else "disabled"
+        menu = (
+            _PopupMenu(self.root)
+            .add_command("新建分组", self._add_group)
+            .add_command("重命名当前分组", self._rename_group)
+            .add_command("删除当前分组", self._delete_group)
+        )
+        menu.add_separator()
+        if selected is not None:
+            menu.add_command("发送选中话术", lambda: self._do_send(selected.phrase))
+            menu.add_command(
+                "插入选中到草稿",
+                lambda: self._insert_phrase_to_draft(selected.phrase),
+            )
+            menu.add_command(
+                "编辑选中话术",
+                lambda: self._edit_phrase(selected._group_index, selected._group),
+            )
+        else:
+            menu.add_command("发送选中话术", None, state=selected_state)
+            menu.add_command("插入选中到草稿", None, state=selected_state)
+            menu.add_command("编辑选中话术", None, state=selected_state)
+        (
+            menu
+            .add_separator()
+            .add_command("删除选中话术", self._delete_phrase, state=selected_state)
+            .show(self.phrase_manage_btn)
+        )
 
     def _toggle_density(self):
         """在舒适 / 紧凑布局间切换，持久化到 config 并立即重排话术卡片。"""
