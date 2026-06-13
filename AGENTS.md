@@ -16,7 +16,7 @@ macOS 辅助工具，通过 Accessibility API（AX API）自动化企业微信�
 - **macOS 集成**：pyobjc-framework-{Cocoa, Quartz, ApplicationServices}
 - **图片处理**：Pillow（缩略图，`uv pip install Pillow`）
 - **Python**：3.10+ 且带 Tk 支持，当前推荐 Miniconda 3.13，venv 用 `uv` 管理（`.venv/bin/python`）
-- **远端仓库**：`ssh://git@git.sankuai.com/~baijinshan/wechat_work_sender.git`（美团内部）
+- **当前远端仓库**：`git@github.com:TreeInWinter/wechat-work-sender.git`（以 `git remote -v` 为准；历史曾记录美团内部远端）
 
 ---
 
@@ -156,34 +156,42 @@ content = raw[:half] if half and raw[:half] == raw[half:] else raw
 ## 项目文件结构
 
 ```
-gui_panel.py      # CustomTkinter GUI（BlockEditor、PhraseCard、发送逻辑）
-sender.py         # 核心：send_message/send_image/send_blocks/AX API/read_chat
-im_clients/       # 即时通讯客户端适配器（企业微信/微信/大象隔离）
-phrases.json      # 话术数据（用户数据）
-build.spec        # PyInstaller 打包配置（arm64）
-build.sh          # 一键打包脚本（输出 dist/miaohui-sidekick.dmg ~31MB）
+gui_panel.py       # CustomTkinter GUI（话术面板 + AI 草稿台 + 支持作者面板）
+sender.py          # 企业微信 AX API 核心（发送 / 读取 / 剪贴板 / 截图）
+im_clients/        # IM 适配器（企业微信 / 微信 / 大象），AX/OCR 细节隔离在各自模块
+ai_reply.py        # AI 回复生成、改写、KB 条目提炼
+kb_search.py       # 本地 Obsidian 知识库 FTS5 检索
+kb_writer.py       # 知识库条目写入 vault
+hss_kb_client.py   # 云端/本地 hss-kb 查询封装
+config.py          # config.json 读写与默认配置
+phrases.json       # 话术数据（用户数据）
+assets/            # 打包资源，目前包含 donation-wechat.jpg
+tests/             # 单元测试（GUI 纯逻辑、IM 适配器、OCR、KB、配置等）
+build.spec         # PyInstaller 打包配置（arm64）
+build.sh           # 一键打包脚本（输出 dist/miaohui-sidekick.dmg）
 docs/
-  design.md           # 技术设计文档
-  product.md          # 产品文档
-  user-manual.md      # 使用手册
-  install-guide.md    # macOS 安装说明（含 Gatekeeper 步骤）
-  session-summary-2026-05-20-21.md  # 会话摘要
+  install-guide.md
+  session-summary-2026-05-20-21.md
+  ui-interaction-spec-v2.md
   superpowers/
-    specs/        # 设计稿
-    plans/        # 实现计划
+    specs/         # 设计稿
+    plans/         # 实现计划
 ```
 
 ---
 
 ## 分支状态
 
+**工作习惯提醒**：不要直接在 `master` 上开始业务修改。发现当前在 `master` 且即将改代码/文档时，应先提醒用户这个习惯不好，并创建 `codex/...` 分支或隔离 worktree 后再继续；如果已经在 `master` 上产生未提交改动，先建分支承接改动，再讨论是否清理 `master`。
+
 | 分支 | 状态 | 说明 |
 |------|------|------|
-| `master` | 主干 | CustomTkinter UI + 图文混排基础 |
-| `feature/rich-text` | 活跃 | 图文混排全功能（BlockEditor、send_blocks）|
-| `feature/macos-installer` | 未合并 | macOS .dmg 安装包 |
-| `feature/sync-minimize` | 未合并 | 同步最小化（已 revert，含文档）|
-| `codex/im-target-selection` | 活跃 | 发现 macOS 已安装 IM 客户端，选择当前接管对象 |
+| `master` | 当前主干 | 本地 HEAD 与 `origin/master` 对齐到 `b487c93`（2026-06-13 观测） |
+| `codex/ios-polish-marked-area` | 已合入主干 | AI 草稿台 / 话术页 iOS 风格收敛、支持作者入口已通过 PR #22 合入 |
+| `feature/rich-text` | 历史长期分支 | 图文混排全功能早期探索，涉及 `BlockEditor` / `send_blocks` |
+| `feature/macos-installer` | 历史长期分支 | macOS `.dmg` 安装包相关 |
+| `feature/sync-minimize` | 历史长期分支 | 同步最小化探索（已 revert，含文档） |
+| `codex/im-target-selection` | 历史长期分支 | 多 IM 接管对象选择早期实现 |
 
 ---
 
@@ -240,6 +248,35 @@ docs/
    - `build.spec` 必须包含 `("assets/donation-wechat.jpg", "assets")`，否则打包后的 `.app` 找不到收款码。
    - 验证：新增 `ResourcePathTests` 覆盖资源路径和二维码存在；`.venv/bin/python -m pytest -q` 结果为 `184 passed, 1 skipped`；`screencapture` 视觉验收确认「支持作者」面板里二维码真实可见。
    - 发送触发策略：`donation_send_count` 记录成功发送次数，每成功发送 10 次后延迟弹出一次「支持作者」面板；失败发送不计数、不弹窗。`next_donation_send_count()` 有单测覆盖 10/20 次触发。
+
+14. **捐赠档位与月度提醒（2026-06-12）**：支持作者弹窗新增本地支持状态登记。
+   - 个人微信收款码不会向桌面 app 自动回传金额或付款人，不能可靠“感知金额”；自动识别金额必须改用微信支付/支付宝商户 API、支付回调或人工导入流水。
+   - 当前可交付闭环为用户扫码后在弹窗手动登记档位：`10元以下` / `10元及以上`，写入 `config.json` 的 `donation_profile`。
+   - 免费用户仍按 `donation_send_count` 每 10 次成功发送弹一次；已登记支持用户按 `last_prompted_at + 1` 个自然月弹一次，月底日期会自动夹到目标月最后一天。
+   - 发送成功后统一走 `next_donation_prompt_state()`，失败发送仍不计数、不弹窗；登记走 `donation_support_registration_update()`，只记录本机状态，不上传用户数据。
+   - 验证：`.venv/bin/python -m py_compile gui_panel.py sender.py config.py` 通过；`.venv/bin/python -m pytest -q` 结果为 `190 passed, 1 skipped, 5 subtests passed`。
+
+15. **当前工作区复读（2026-06-13）**：本次重新读取项目并更新 `AGENTS.md`，未继续改业务逻辑。
+   - 当前分支 `master` 与 `origin/master` 对齐；`origin` 实际为 `git@github.com:TreeInWinter/wechat-work-sender.git`。
+   - 工作区仍有未提交改动：`AGENTS.md`、`config.py`、`gui_panel.py`、`tests/test_gui_panel_ui.py`。其中后三个来自 2026-06-12 的捐赠档位/月度提醒实现，提交前不要误删或回滚。
+   - 当前版本文件 `VERSION` 为 `1.4.0.0`；`README.md` 描述的产品形态已是多 IM + AI 回复助手 + 知识库捕获，而不是仅企业微信话术面板。
+   - 文档目录当前没有 `docs/design.md`、`docs/product.md`、`docs/user-manual.md`；实际可见文档为 `install-guide.md`、`session-summary-2026-05-20-21.md`、`ui-interaction-spec-v2.md` 以及 `docs/superpowers/{specs,plans}`。
+   - 本次轻量验证：`git diff --check`、`.venv/bin/python -m py_compile gui_panel.py sender.py config.py`、`.venv/bin/python -m pytest tests/test_gui_panel_ui.py::DonationPromptTests -q` 均通过，捐赠策略单测结果为 `6 passed, 5 subtests passed`。
+   - 用户明确要求以后纠正“在 master 上直接修改”的习惯；已在分支状态区新增工作习惯提醒。
+
+16. **Tk / PyObjC native crash 规避（2026-06-13）**：一次 `python3.13` 崩溃报告显示 `SIGABRT`，native 栈为 `PyEval_RestoreThread -> PythonCmd -> Tk_BindEvent -> Tcl_DoOneEvent -> _tkinter_tkapp_mainloop_impl`。
+   - 这类崩溃不是 Python 异常，通常是 Tk 事件回调进入 Python 时线程状态被 PyObjC/Cocoa reentrancy 打乱；项目此前已在 `window_follow.py` 记录过类似 `PyEval_RestoreThread fatal`。
+   - 当前最可疑路径是事件驱动拖拽跟随的全局 `NSEvent.addGlobalMonitorForEventsMatchingMask_handler_`。即使 handler 只做赋值，真实运行仍可能让 Cocoa/Tk 事件泵交错。
+   - 修复策略：默认关闭事件驱动拖拽跟随，回退到稳定的 100ms AX 轮询；仅当环境变量 `SIDEKICK_ENABLE_DRAG_FOLLOW` 为 `1/true/yes/on` 时才安装全局 `NSEvent` 监听。
+   - 验证：新增 `DragFollowSafetyTests` 覆盖默认关闭与显式开启；可控复现脚本验证启动、手动打开支持作者面板、发送成功后自动弹支持作者面板均未崩溃。
+
+17. **支付方向回退：短期继续个人收款码（2026-06-13）**：用户确认短期无法成为微信商户，官方支付后端 + 商户二维码 mock 方向从客户端主线回退。
+   - 已删除客户端里的 `payment_client.py`、`tests/test_payment_client.py`、支付服务设置页、动态订单二维码、`qrcode` 依赖，以及官方支付设计/计划文档。
+   - 「支持作者」回到个人微信收款码：固定使用 `assets/donation-wechat.jpg`，扫码后用户手动登记 `10元以下` / `10元及以上`，写入本机 `donation_profile`。
+   - 必须继续明确产品限制：个人收款码不会自动回传付款状态、付款人或金额，应用无法可靠验证是否大于 10 元；当前频控是本机体验策略，不是支付核验。
+   - 免费用户仍按 `donation_send_count` 每 10 次成功发送弹一次；登记过支持状态的用户按 `last_prompted_at + 1` 个自然月提醒一次。
+   - `~/IdeaProjects/sidekick-pay-server` 后端项目保留为历史实验资产，当前客户端不接入、不依赖、不作为短期交付路径。
+   - 回退验证：`.venv/bin/python -m pytest -q` 为 `192 passed, 1 skipped, 9 subtests passed`；`.venv/bin/python -m py_compile gui_panel.py config.py sender.py` 和 `git diff --check` 通过。
 
 ---
 
