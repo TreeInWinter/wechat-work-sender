@@ -186,7 +186,7 @@ docs/
 
 | 分支 | 状态 | 说明 |
 |------|------|------|
-| `master` | 当前主干 | 本地 HEAD 与 `origin/master` 对齐到 `b487c93`（2026-06-13 观测） |
+| `master` | 当前主干 | 本地 HEAD 与 `origin/master` 对齐到 `655efb0`（2026-06-13 观测） |
 | `codex/ios-polish-marked-area` | 已合入主干 | AI 草稿台 / 话术页 iOS 风格收敛、支持作者入口已通过 PR #22 合入 |
 | `feature/rich-text` | 历史长期分支 | 图文混排全功能早期探索，涉及 `BlockEditor` / `send_blocks` |
 | `feature/macos-installer` | 历史长期分支 | macOS `.dmg` 安装包相关 |
@@ -277,6 +277,13 @@ docs/
    - 免费用户仍按 `donation_send_count` 每 10 次成功发送弹一次；登记过支持状态的用户按 `last_prompted_at + 1` 个自然月提醒一次。
    - `~/IdeaProjects/sidekick-pay-server` 后端项目保留为历史实验资产，当前客户端不接入、不依赖、不作为短期交付路径。
    - 回退验证：`.venv/bin/python -m pytest -q` 为 `192 passed, 1 skipped, 9 subtests passed`；`.venv/bin/python -m py_compile gui_panel.py config.py sender.py` 和 `git diff --check` 通过。
+
+18. **拉取最新代码并更新打包脚本（2026-06-13）**：本地 `master` 已拉到 `origin/master` 的 `655efb0`，实际修改承接在 `codex/update-build-script` 分支。
+   - `build.sh` 现在会在缺少 `.venv` 且存在 `uv` 时自动执行 `uv venv`，随后通过 `uv pip install --python .venv/bin/python -r requirements.txt`（或 pip fallback）同步完整依赖。
+   - 打包前新增必需文件校验：`requirements.txt`、`build.spec`、`phrases.json`、`assets/donation-wechat.jpg`，避免二维码资源漏包后才在运行期暴露。
+   - 打包前新增 `.venv/bin/python -m py_compile gui_panel.py sender.py config.py` 轻量入口语法检查，产物仍为 `dist/miaohui-sidekick.dmg`。
+   - 新增 `tests/test_build_script.py` 锁定 build 脚本自举、依赖同步、资源校验和语法检查行为。
+   - 验证：`.venv/bin/python -m pytest -q` 为 `197 passed, 1 skipped, 9 subtests passed`；`./build.sh` 成功生成 `dist/miaohui-sidekick.dmg`（24MB），且确认 `dist/秒回SideKick.app/Contents/Resources/assets/donation-wechat.jpg` 存在。
 
 ---
 
