@@ -28,8 +28,14 @@ _DEFAULTS: dict = {
     "density": "comfortable",
     # 成功发送计数：免费用户每 10 次成功发送后提示一次「支持作者」
     "donation_send_count": 0,
-    # 本机支持状态。None 表示未登记；登记后由 gui_panel 写入档位、渠道和提示日期。
+    # 历史本机支持状态：保留兼容旧配置，但不再作为可信支付状态。
     "donation_profile": None,
+    # 支付服务配置：客户端只保存服务地址、provider 偏好、安装标识和权益缓存。
+    "payment_server_url": "http://127.0.0.1:8787",
+    "payment_provider": "mock",
+    "payment_default_amount_cents": 1000,
+    "payment_install_id": "",
+    "payment_entitlement_cache": None,
 }
 
 

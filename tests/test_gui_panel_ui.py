@@ -5,7 +5,8 @@ GUI 装配（CustomTkinter 布局）不在此测试，走启动冒烟验证。
 import unittest
 import sys
 import types
-from datetime import date
+from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 
 def _install_gui_panel_import_stubs():
@@ -120,6 +121,22 @@ class DragFollowCallbackTests(unittest.TestCase):
         self.assertTrue(stub._drag_end_pending)
 
 
+class DragFollowSafetyTests(unittest.TestCase):
+    def test_event_driven_drag_follow_disabled_by_default(self):
+        with patch.dict(gui_panel.os.environ, {}, clear=True):
+            self.assertFalse(gui_panel.drag_follow_enabled())
+
+    def test_event_driven_drag_follow_can_be_enabled_for_experiments(self):
+        for value in ("1", "true", "yes", "on"):
+            with self.subTest(value=value):
+                with patch.dict(
+                    gui_panel.os.environ,
+                    {"SIDEKICK_ENABLE_DRAG_FOLLOW": value},
+                    clear=True,
+                ):
+                    self.assertTrue(gui_panel.drag_follow_enabled())
+
+
 class DraftHistoryTests(unittest.TestCase):
     def test_push_and_undo(self):
         h = gui_panel.DraftHistory()
@@ -211,81 +228,84 @@ class DonationPromptTests(unittest.TestCase):
         self.assertEqual(updates[gui_panel.DONATION_SEND_COUNT_KEY], 10)
         self.assertTrue(should_prompt)
 
-    def test_under_ten_donation_prompts_monthly_after_registration(self):
-        registration = gui_panel.donation_support_registration_update(
-            gui_panel.DONATION_TIER_UNDER_10,
-            "wechat",
-            now=date(2026, 6, 12),
-        )
-        profile = registration[gui_panel.DONATION_PROFILE_KEY]
-
-        before_updates, before_prompt = gui_panel.next_donation_prompt_state(
-            {
-                gui_panel.DONATION_SEND_COUNT_KEY: 18,
-                gui_panel.DONATION_PROFILE_KEY: profile,
-            },
-            now=date(2026, 7, 11),
-        )
-        due_updates, due_prompt = gui_panel.next_donation_prompt_state(
-            {
-                gui_panel.DONATION_SEND_COUNT_KEY: 19,
-                gui_panel.DONATION_PROFILE_KEY: profile,
-            },
-            now=date(2026, 7, 12),
-        )
-
-        self.assertFalse(before_prompt)
-        self.assertNotIn(gui_panel.DONATION_PROFILE_KEY, before_updates)
-        self.assertTrue(due_prompt)
-        self.assertEqual(due_updates[gui_panel.DONATION_SEND_COUNT_KEY], 20)
-        self.assertEqual(
-            due_updates[gui_panel.DONATION_PROFILE_KEY]["last_prompted_at"],
-            "2026-07-12",
-        )
-
-    def test_ten_or_more_donation_uses_same_monthly_prompt_policy(self):
-        registration = gui_panel.donation_support_registration_update(
-            gui_panel.DONATION_TIER_AT_LEAST_10,
-            "wechat",
-            now=date(2026, 1, 31),
-        )
-        profile = registration[gui_panel.DONATION_PROFILE_KEY]
-
+    def test_unexpired_payment_entitlement_suppresses_prompt(self):
         updates, should_prompt = gui_panel.next_donation_prompt_state(
             {
-                gui_panel.DONATION_SEND_COUNT_KEY: 2,
-                gui_panel.DONATION_PROFILE_KEY: profile,
+                gui_panel.DONATION_SEND_COUNT_KEY: 9,
+                gui_panel.PAYMENT_ENTITLEMENT_CACHE_KEY: {
+                    "tier": "supporter",
+                    "support_until": "2026-07-13T00:00:00+08:00",
+                },
             },
-            now=date(2026, 2, 28),
+            now=datetime(2026, 6, 13, tzinfo=timezone.utc),
         )
 
-        self.assertTrue(should_prompt)
-        self.assertEqual(updates[gui_panel.DONATION_SEND_COUNT_KEY], 3)
-        self.assertEqual(
-            updates[gui_panel.DONATION_PROFILE_KEY]["last_prompted_at"],
-            "2026-02-28",
-        )
+        self.assertEqual(updates[gui_panel.DONATION_SEND_COUNT_KEY], 10)
+        self.assertFalse(should_prompt)
 
-    def test_registration_records_local_supporter_profile(self):
-        updates = gui_panel.donation_support_registration_update(
-            gui_panel.DONATION_TIER_AT_LEAST_10,
-            "wechat",
-            now=date(2026, 6, 12),
-        )
-
-        self.assertEqual(
-            updates,
+    def test_expired_payment_entitlement_uses_free_prompt_policy(self):
+        updates, should_prompt = gui_panel.next_donation_prompt_state(
             {
+                gui_panel.DONATION_SEND_COUNT_KEY: 9,
+                gui_panel.PAYMENT_ENTITLEMENT_CACHE_KEY: {
+                    "tier": "supporter",
+                    "support_until": "2026-06-01T00:00:00+08:00",
+                },
+            },
+            now=datetime(2026, 6, 13, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(updates[gui_panel.DONATION_SEND_COUNT_KEY], 10)
+        self.assertTrue(should_prompt)
+
+    def test_legacy_donation_profile_no_longer_suppresses_prompt(self):
+        updates, should_prompt = gui_panel.next_donation_prompt_state(
+            {
+                gui_panel.DONATION_SEND_COUNT_KEY: 9,
                 gui_panel.DONATION_PROFILE_KEY: {
-                    "tier": gui_panel.DONATION_TIER_AT_LEAST_10,
+                    "tier": "at_least_10",
                     "channel": "wechat",
                     "registered_at": "2026-06-12",
                     "last_donation_at": "2026-06-12",
                     "last_prompted_at": "2026-06-12",
                     "prompt_interval_months": 1,
-                }
+                },
             },
+            now=date(2026, 6, 13),
         )
+
+        self.assertEqual(updates[gui_panel.DONATION_SEND_COUNT_KEY], 10)
+        self.assertTrue(should_prompt)
+        self.assertNotIn(gui_panel.DONATION_PROFILE_KEY, updates)
+
+    def test_local_support_registration_helper_is_removed(self):
+        self.assertFalse(hasattr(gui_panel, "donation_support_registration_update"))
+        self.assertFalse(hasattr(gui_panel.WXSenderApp, "_save_donation_support"))
+
+
+class PaymentProviderReadinessTests(unittest.TestCase):
+    def test_formats_configured_and_missing_provider_env(self):
+        text, color = gui_panel.format_payment_provider_readiness({
+            "providers": [
+                {"provider": "mock", "configured": True, "missing": []},
+                {
+                    "provider": "wechat",
+                    "configured": False,
+                    "missing": ["WECHAT_PAY_MCHID", "WECHAT_PAY_APPID"],
+                },
+                {
+                    "provider": "alipay",
+                    "configured": False,
+                    "missing": ["ALIPAY_APP_ID"],
+                },
+            ]
+        })
+
+        self.assertEqual(
+            text,
+            "支付服务连接正常 · Mock 可用；微信支付缺 WECHAT_PAY_MCHID、WECHAT_PAY_APPID；支付宝缺 ALIPAY_APP_ID",
+        )
+        self.assertEqual(color, gui_panel.DOT_ERR)
 
 
 class FilterPhrasesTests(unittest.TestCase):
