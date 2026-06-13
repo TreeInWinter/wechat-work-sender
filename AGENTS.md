@@ -270,19 +270,13 @@ docs/
    - 修复策略：默认关闭事件驱动拖拽跟随，回退到稳定的 100ms AX 轮询；仅当环境变量 `SIDEKICK_ENABLE_DRAG_FOLLOW` 为 `1/true/yes/on` 时才安装全局 `NSEvent` 监听。
    - 验证：新增 `DragFollowSafetyTests` 覆盖默认关闭与显式开启；可控复现脚本验证启动、手动打开支持作者面板、发送成功后自动弹支持作者面板均未崩溃。
 
-17. **支付核验后端 + 商户二维码 mock（2026-06-13）**：为解决个人收款码无法验证支付状态、金额和弹窗频控的问题，新增官方支付后端方向。
-   - 设计文档：`docs/superpowers/specs/2026-06-13-payment-verification-design.md`；实现计划：`docs/superpowers/plans/2026-06-13-payment-verification.md`。
-   - 新后端项目固定在 `~/IdeaProjects/sidekick-pay-server`，FastAPI + SQLite + SQLAlchemy；第一阶段 provider 为 `mock`，微信支付 Native / 支付宝预创建 provider 先保留未配置边界，真实商户私钥/API key 只允许放后端 `.env`，不进入 macOS 客户端。
-   - 客户端新增 `payment_client.py`，配置项为 `payment_server_url`、`payment_provider`、`payment_default_amount_cents`、`payment_install_id`、`payment_entitlement_cache`。
-   - 顶部 `⋯` 菜单新增「支付服务设置…」，作为商户二维码 mock 配置页：可测试连接、生成 mock 二维码、模拟支付成功。
-   - 「支持作者」面板已改为动态订单二维码和轮询状态；旧的「我已支持（10元以下 / 10元及以上）」按钮不再作为可信支付状态入口。旧 `donation_profile` 保留兼容读取，但不再抑制弹窗。
-   - 弹窗频控改为服务端权益优先：`payment_entitlement_cache.tier == supporter` 且 `support_until` 未过期时不自动弹窗；权益缺失/过期/服务不可用时仍按免费用户每 10 次成功发送提醒。
-   - 当前验证：后端 `.venv/bin/python -m pytest -q` 为 `19 passed, 1 warning`；客户端 `.venv/bin/python -m pytest -q` 为 `200 passed, 1 skipped, 9 subtests passed`；前后端 HTTP 联调 health / providers / create mock order / mock pay / get entitlement 通过；Tk widget-tree smoke 确认支付设置页与动态支持面板关键控件存在，CLI `screencapture` 因屏幕录制权限只得到黑屏，未作为视觉证据。
-   - 继续推进（同日）：后端 `WechatNativeProvider` 已能按配置构造微信 Native 下单请求并生成 `WECHATPAY2-SHA256-RSA2048` Authorization；`AlipayPrecreateProvider` 已能构造 `alipay.trade.precreate` 表单并生成 RSA2 签名。两者均有 mocked transport 单测覆盖二维码字段解析；生产实付仍需真实商户凭证、公网回调 URL 和商户沙箱/生产账号验证。
-   - 再推进（同日）：后端新增统一 provider 确认入口 `/api/v1/provider-confirmations`、回调入口 `/api/v1/webhooks/{wechat,alipay}` 和查单补偿入口 `/api/v1/orders/{order_id}/sync`。微信回调路径已覆盖平台 RSA 签名验证 + API v3 AES-GCM resource 解密；支付宝回调路径已覆盖 RSA2 签名验签；微信/支付宝 query_order 均有 mocked transport 单测。所有确认路径最终走同一套金额核验和权益更新，`paid_amount_cents >= 1000` 才给 supporter。
-   - 客户端 `payment_client.py` 已新增 `sync_order()`；支持作者面板轮询到非 Mock 订单仍为 `pending` 时，会调用后端 `/api/v1/orders/{order_id}/sync` 做查单补偿，查到 `paid` 后写入 `payment_entitlement_cache` 并停止自动提醒。
-   - 后端新增 `/api/v1/providers` readiness 接口，返回 `mock/wechat/alipay` 的 `configured` 与缺失环境变量；客户端 `payment_client.py` 新增 `providers()`，支付服务设置页的「测试连接」会同时检查 `/healthz` 和 provider readiness，Mock 可用、微信/支付宝缺商户配置时会直接在配置页展示缺失项。
-   - 本轮收口：客户端已移除旧的本地“登记支持” helper，支持状态不再有用户自称入口；后端 `payment_events` 新增 `provider_event_id` 字段，provider 确认按 `provider + event_type + provider_event_id` 幂等，重复 webhook/查单不会重复写确认事件或重复延长权益；后端启动时会为旧 SQLite `payment_events` 表自动补 `provider_event_id` 列和索引。
+17. **支付方向回退：短期继续个人收款码（2026-06-13）**：用户确认短期无法成为微信商户，官方支付后端 + 商户二维码 mock 方向从客户端主线回退。
+   - 已删除客户端里的 `payment_client.py`、`tests/test_payment_client.py`、支付服务设置页、动态订单二维码、`qrcode` 依赖，以及官方支付设计/计划文档。
+   - 「支持作者」回到个人微信收款码：固定使用 `assets/donation-wechat.jpg`，扫码后用户手动登记 `10元以下` / `10元及以上`，写入本机 `donation_profile`。
+   - 必须继续明确产品限制：个人收款码不会自动回传付款状态、付款人或金额，应用无法可靠验证是否大于 10 元；当前频控是本机体验策略，不是支付核验。
+   - 免费用户仍按 `donation_send_count` 每 10 次成功发送弹一次；登记过支持状态的用户按 `last_prompted_at + 1` 个自然月提醒一次。
+   - `~/IdeaProjects/sidekick-pay-server` 后端项目保留为历史实验资产，当前客户端不接入、不依赖、不作为短期交付路径。
+   - 回退验证：`.venv/bin/python -m pytest -q` 为 `192 passed, 1 skipped, 9 subtests passed`；`.venv/bin/python -m py_compile gui_panel.py config.py sender.py` 和 `git diff --check` 通过。
 
 ---
 

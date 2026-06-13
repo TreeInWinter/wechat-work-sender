@@ -3,5 +3,4 @@ pyobjc-framework-Cocoa
 pyobjc-framework-Quartz
 pyobjc-framework-ApplicationServices
 Pillow
-qrcode
 pyinstaller

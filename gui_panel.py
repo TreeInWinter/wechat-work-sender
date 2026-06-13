@@ -16,7 +16,7 @@ import re
 import copy
 import sys
 import calendar
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 import customtkinter as ctk
 import tkinter as tk
@@ -54,19 +54,6 @@ from ai_reply import (
 from kb_writer import KBEntry, save_to_vault
 from config import load_config, save_config
 from draft_log import log_draft_diff
-from payment_client import (
-    DEFAULT_PAYMENT_AMOUNT_CENTS,
-    DEFAULT_PAYMENT_PROVIDER,
-    DEFAULT_PAYMENT_SERVER_URL,
-    PAYMENT_DEFAULT_AMOUNT_CENTS_KEY,
-    PAYMENT_ENTITLEMENT_CACHE_KEY,
-    PAYMENT_INSTALL_ID_KEY,
-    PAYMENT_PROVIDER_KEY,
-    PAYMENT_SERVER_URL_KEY,
-    PaymentClient,
-    PaymentClientError,
-    ensure_payment_config,
-)
 
 try:
     from kb_search import rebuild_index as _kb_rebuild, get_db_path as _kb_get_db_path
@@ -224,12 +211,6 @@ DONATION_TIER_LABELS = {
     DONATION_TIER_UNDER_10: "已支持（10元以下）",
     DONATION_TIER_AT_LEAST_10: "已支持（10元及以上）",
 }
-PAYMENT_PROVIDER_LABELS = {
-    "mock": "Mock",
-    "wechat": "微信支付",
-    "alipay": "支付宝",
-}
-PAYMENT_PROVIDER_VALUES = {label: value for value, label in PAYMENT_PROVIDER_LABELS.items()}
 
 
 def app_resource_path(relative_path: str) -> str:
@@ -278,31 +259,6 @@ def _parse_iso_date(value) -> date | None:
     return None
 
 
-def _coerce_datetime(value=None) -> datetime:
-    if value is None:
-        return datetime.now(timezone.utc)
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, date):
-        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
-    raise TypeError(f"Unsupported datetime value: {value!r}")
-
-
-def _parse_iso_datetime(value) -> datetime | None:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, date):
-        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
-    if isinstance(value, str) and value.strip():
-        try:
-            normalized = value.replace("Z", "+00:00")
-            parsed = datetime.fromisoformat(normalized)
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-        except ValueError:
-            return None
-    return None
-
-
 def _add_months(day: date, months: int) -> date:
     month_index = day.month - 1 + max(1, int(months))
     year = day.year + month_index // 12
@@ -320,6 +276,23 @@ def _normal_donation_profile(profile) -> dict:
     normalized = dict(profile)
     normalized["tier"] = tier
     return normalized
+
+
+def donation_support_registration_update(tier: str, channel: str, now=None) -> dict:
+    """记录本机用户主动登记的支持档位；个人收款码无法自动回传金额。"""
+    if tier not in DONATION_MONTHLY_TIERS:
+        raise ValueError(f"Unsupported donation tier: {tier!r}")
+    today = _coerce_date(now).isoformat()
+    return {
+        DONATION_PROFILE_KEY: {
+            "tier": tier,
+            "channel": channel or "wechat",
+            "registered_at": today,
+            "last_donation_at": today,
+            "last_prompted_at": today,
+            "prompt_interval_months": DONATION_MONTHLY_INTERVAL_MONTHS,
+        }
+    }
 
 
 def donation_tier_label(tier: str) -> str:
@@ -355,56 +328,25 @@ def donation_status_text(profile, now=None) -> str:
     return f"{DONATION_TIER_LABELS[DONATION_TIER_FREE]} · 每 {DONATION_PROMPT_INTERVAL} 次发送提醒一次"
 
 
-def payment_entitlement_active(cache, now=None) -> bool:
-    if not isinstance(cache, dict):
-        return False
-    if cache.get("tier") != "supporter":
-        return False
-    support_until = _parse_iso_datetime(cache.get("support_until"))
-    if not support_until:
-        return False
-    return support_until > _coerce_datetime(now)
-
-
-def payment_status_text(cache, now=None) -> str:
-    if payment_entitlement_active(cache, now=now):
-        support_until = _parse_iso_datetime(cache.get("support_until"))
-        return f"已支持 · 有效期至 {support_until.date().isoformat()}"
-    return f"免费使用中 · 每 {DONATION_PROMPT_INTERVAL} 次发送提醒一次"
-
-
-def format_payment_provider_readiness(payload) -> tuple[str, str]:
-    providers = payload.get("providers") if isinstance(payload, dict) else None
-    if not isinstance(providers, list):
-        return "支付服务连接正常 · 未返回支付渠道配置状态", TEXT_WEAK
-
-    parts = []
-    has_missing = False
-    for item in providers:
-        if not isinstance(item, dict):
-            continue
-        provider = item.get("provider", "")
-        label = PAYMENT_PROVIDER_LABELS.get(provider, provider or "未知渠道")
-        missing = [str(value) for value in item.get("missing") or [] if str(value)]
-        if item.get("configured") and not missing:
-            parts.append(f"{label} 可用")
-        else:
-            has_missing = True
-            parts.append(f"{label}缺 {'、'.join(missing) if missing else '商户配置'}")
-    if not parts:
-        return "支付服务连接正常 · 未返回支付渠道配置状态", TEXT_WEAK
-    color = DOT_ERR if has_missing else DOT_OK
-    return f"支付服务连接正常 · {'；'.join(parts)}", color
-
-
 def next_donation_prompt_state(config: dict | None, now=None) -> tuple[dict, bool]:
     """成功发送后的捐赠提示策略，返回要持久化的更新和是否弹窗。"""
     config = config or {}
+    today = _coerce_date(now)
     count, free_should_prompt = next_donation_send_count(config.get(DONATION_SEND_COUNT_KEY, 0))
     updates = {DONATION_SEND_COUNT_KEY: count}
-    if payment_entitlement_active(config.get(PAYMENT_ENTITLEMENT_CACHE_KEY), now=now):
-        return updates, False
-    return updates, free_should_prompt
+
+    profile = _normal_donation_profile(config.get(DONATION_PROFILE_KEY))
+    if profile.get("tier") not in DONATION_MONTHLY_TIERS:
+        return updates, free_should_prompt
+
+    next_prompt = donation_next_prompt_date(profile)
+    should_prompt = next_prompt is None or today >= next_prompt
+    if should_prompt:
+        updated_profile = dict(profile)
+        updated_profile["last_prompted_at"] = today.isoformat()
+        updated_profile["prompt_interval_months"] = DONATION_MONTHLY_INTERVAL_MONTHS
+        updates[DONATION_PROFILE_KEY] = updated_profile
+    return updates, should_prompt
 
 
 # ============================================================
@@ -784,26 +726,6 @@ def make_contained_image(path: str, size: tuple = (260, 354)):
         img_rgba.thumbnail(size, PILImage.LANCZOS)
         canvas.paste(img_rgba, ((size[0] - img_rgba.width) // 2,
                                 (size[1] - img_rgba.height) // 2))
-        return ctk.CTkImage(light_image=canvas, dark_image=canvas, size=size)
-    except Exception:
-        return None
-
-
-def make_qr_image(payload: str, size: tuple = (220, 220)):
-    """把后端返回的二维码内容渲染为 CTkImage；缺依赖或异常时返回 None。"""
-    try:
-        if not payload:
-            return None
-        import qrcode
-        from PIL import Image as PILImage
-
-        qr = qrcode.QRCode(border=2, box_size=8)
-        qr.add_data(payload)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white").convert("RGBA")
-        img.thumbnail(size, PILImage.LANCZOS)
-        canvas = PILImage.new("RGBA", size, (255, 255, 255, 255))
-        canvas.paste(img, ((size[0] - img.width) // 2, (size[1] - img.height) // 2))
         return ctk.CTkImage(light_image=canvas, dark_image=canvas, size=size)
     except Exception:
         return None
@@ -1616,12 +1538,7 @@ class WXSenderApp:
         self._ai_kb_capturing = False
         self._ai_anim_running = False
         self._ai_anim_tick = 0
-        self._app_config, payment_updates = ensure_payment_config(load_config())
-        if payment_updates:
-            try:
-                save_config(payment_updates)
-            except OSError:
-                pass
+        self._app_config = load_config()
         self._density = self._app_config.get("density", "comfortable")  # UI 密度
         self.clients = discover_clients()
         self.current_client = choose_default_client(self.clients)
@@ -1930,7 +1847,6 @@ class WXSenderApp:
          .add_command("刷新状态与 IM 连接", self._refresh_targets_and_status)
          .add_separator()
          .add_command("AI / 知识库设置…",  self._show_ai_settings)
-         .add_command("支付服务设置…",      self._show_payment_settings)
          .add_command(density_label,        self._toggle_density)
          .add_separator()
          .add_command("导出话术库…",        self._export_phrases)
@@ -3824,329 +3740,29 @@ class WXSenderApp:
         _AlertDialog(self.root, title, message, level="info").wait()
         self.root.attributes("-topmost", True)
 
-    def _payment_client(self) -> PaymentClient:
-        return PaymentClient(
-            self._app_config.get(PAYMENT_SERVER_URL_KEY, DEFAULT_PAYMENT_SERVER_URL)
-        )
-
-    def _payment_install_id(self) -> str:
-        self._app_config, updates = ensure_payment_config(self._app_config)
-        if updates:
-            try:
-                save_config(updates)
-            except OSError:
-                pass
-        return self._app_config[PAYMENT_INSTALL_ID_KEY]
-
-    def _payment_amount_cents(self, raw_value=None) -> int:
-        if raw_value is None:
-            raw_value = self._app_config.get(PAYMENT_DEFAULT_AMOUNT_CENTS_KEY, DEFAULT_PAYMENT_AMOUNT_CENTS)
+    def _save_donation_support(self, tier: str, channel: str = "wechat") -> bool:
+        updates = donation_support_registration_update(tier, channel)
+        self._app_config.update(updates)
         try:
-            if isinstance(raw_value, str):
-                value = raw_value.strip().replace("￥", "").replace("元", "")
-                if "." in value:
-                    cents = int(round(float(value) * 100))
-                else:
-                    cents = int(value)
-                    if cents < 100:
-                        cents *= 100
-            else:
-                cents = int(raw_value)
-        except (TypeError, ValueError):
-            cents = DEFAULT_PAYMENT_AMOUNT_CENTS
-        return max(1, cents)
-
-    def _save_payment_entitlement(self, payload: dict) -> dict:
-        cache = {
-            "tier": payload.get("tier", "free"),
-            "support_until": payload.get("support_until"),
-            "last_paid_amount_cents": payload.get("last_paid_amount_cents", payload.get("paid_amount_cents", 0)),
-            "last_provider": payload.get("last_provider", payload.get("provider")),
-            "last_checked_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._app_config[PAYMENT_ENTITLEMENT_CACHE_KEY] = cache
-        try:
-            save_config({PAYMENT_ENTITLEMENT_CACHE_KEY: cache})
-        except OSError:
-            pass
-        return cache
-
-    def _show_payment_settings(self):
-        """支付服务配置：mock 商户二维码和前后端联调入口。"""
-        self.root.attributes("-topmost", False)
-        win = ctk.CTkToplevel(self.root)
-        win.withdraw()
-        win.title("支付服务设置")
-        win.resizable(False, False)
-        self._center_on_root(win, 420, 560)
-        win.lift()
-        win.focus_force()
-        win.grab_set()
-        win.attributes("-topmost", True)
-
-        def on_close():
-            win.destroy()
-            self.root.attributes("-topmost", True)
-
-        win.protocol("WM_DELETE_WINDOW", on_close)
-
-        header = ctk.CTkFrame(win, height=44, corner_radius=0, fg_color=HEADER_BG)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        ctk.CTkFrame(win, height=1, corner_radius=0, fg_color=BORDER).pack(fill="x")
-        ctk.CTkLabel(
-            header, text="支付服务设置", text_color=TEXT_MAIN,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
-        ).pack(side="left", padx=14, pady=12)
-        ctk.CTkButton(
-            header, text="✕", width=32, height=32, corner_radius=8,
-            fg_color="transparent", hover_color=PILL_HOVER,
-            text_color=TEXT_SUB, font=ctk.CTkFont(size=14),
-            command=on_close,
-        ).pack(side="right", padx=8)
-
-        body = ctk.CTkFrame(win, fg_color=APP_BG, corner_radius=0)
-        body.pack(fill="both", expand=True)
-
-        url_var = ctk.StringVar(value=self._app_config.get(PAYMENT_SERVER_URL_KEY, DEFAULT_PAYMENT_SERVER_URL))
-        saved_provider = self._app_config.get(PAYMENT_PROVIDER_KEY, DEFAULT_PAYMENT_PROVIDER)
-        provider_var = ctk.StringVar(value=PAYMENT_PROVIDER_LABELS.get(saved_provider, "Mock"))
-        amount_var = ctk.StringVar(
-            value=f"{self._payment_amount_cents() / 100:.2f}"
-        )
-        current_order = {"order": None}
-
-        def row(label: str):
-            frame = ctk.CTkFrame(body, fg_color="transparent")
-            frame.pack(fill="x", padx=18, pady=(12, 0))
-            ctk.CTkLabel(
-                frame, text=label, text_color=TEXT_MAIN,
-                font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-                width=86, anchor="w",
-            ).pack(side="left")
-            return frame
-
-        url_row = row("服务地址")
-        ctk.CTkEntry(
-            url_row, textvariable=url_var, height=30, corner_radius=10,
-            border_color=BORDER, font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-        ).pack(side="left", fill="x", expand=True)
-
-        provider_row = row("支付渠道")
-        ctk.CTkSegmentedButton(
-            provider_row,
-            values=list(PAYMENT_PROVIDER_VALUES.keys()),
-            variable=provider_var,
-            width=280,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-        ).pack(side="left", fill="x", expand=True)
-
-        amount_row = row("默认金额")
-        ctk.CTkEntry(
-            amount_row, textvariable=amount_var, height=30, corner_radius=10,
-            border_color=BORDER, font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            placeholder_text="10.00",
-        ).pack(side="left", fill="x", expand=True)
-
-        status_lbl = ctk.CTkLabel(
-            body,
-            text="Mock 模式可在本机完成二维码生成、模拟支付和权益刷新。",
-            text_color=TEXT_WEAK,
-            wraplength=360,
-            justify="left",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-        )
-        status_lbl.pack(fill="x", padx=20, pady=(12, 8))
-
-        qr_card = ctk.CTkFrame(body, fg_color=SURFACE, corner_radius=14, border_width=1, border_color=BORDER)
-        qr_card.pack(fill="x", padx=20, pady=(0, 12))
-        qr_lbl = ctk.CTkLabel(
-            qr_card,
-            text="生成测试二维码后在这里预览",
-            text_color=TEXT_WEAK,
-            wraplength=300,
-            justify="center",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-        )
-        qr_lbl.pack(padx=14, pady=16)
-
-        def set_status(text: str, color=TEXT_WEAK):
-            status_lbl.configure(text=text, text_color=color)
-
-        def selected_provider() -> str:
-            return PAYMENT_PROVIDER_VALUES.get(provider_var.get(), DEFAULT_PAYMENT_PROVIDER)
-
-        def save_settings() -> bool:
-            updates = {
-                PAYMENT_SERVER_URL_KEY: url_var.get().strip() or DEFAULT_PAYMENT_SERVER_URL,
-                PAYMENT_PROVIDER_KEY: selected_provider(),
-                PAYMENT_DEFAULT_AMOUNT_CENTS_KEY: self._payment_amount_cents(amount_var.get()),
-            }
-            self._app_config.update(updates)
-            try:
-                save_config(updates)
-            except OSError as exc:
-                self._show_warning(f"保存支付设置失败：{exc}")
-                return False
-            return True
-
-        def show_qr(order: dict):
-            qr_payload = order.get("qr_code", "")
-            qr_image = make_qr_image(qr_payload)
-            win._payment_qr_image = qr_image
-            if qr_image:
-                qr_lbl.configure(text="", image=qr_image)
-            else:
-                qr_lbl.configure(
-                    image=None,
-                    text=f"二维码内容：\n{qr_payload[:220]}",
-                    text_color=TEXT_MAIN,
-                )
-
-        def run_async(work, done):
-            def task():
-                try:
-                    result = work()
-                    err = None
-                except Exception as exc:
-                    result = None
-                    err = exc
-                self.root.after(0, lambda: done(result, err))
-
-            threading.Thread(target=task, daemon=True).start()
-
-        def on_test_connection():
-            if not save_settings():
-                return
-            set_status("正在连接支付服务…")
-            client = self._payment_client()
-
-            def work():
-                return {
-                    "health": client.health(),
-                    "providers": client.providers(),
-                }
-
-            def done(result, err):
-                if err:
-                    set_status(f"连接失败：{getattr(err, 'message', err)}", DOT_ERR)
-                    return
-                if not result.get("health", {}).get("ok"):
-                    set_status("连接失败：支付服务健康检查未通过", DOT_ERR)
-                    return
-                text, color = format_payment_provider_readiness(result.get("providers"))
-                set_status(text, color)
-
-            run_async(
-                work,
-                done,
-            )
-
-        def on_generate_qr():
-            if not save_settings():
-                return
-            set_status("正在生成测试二维码…")
-            client = self._payment_client()
-            install_id = self._payment_install_id()
-            provider = self._app_config.get(PAYMENT_PROVIDER_KEY, DEFAULT_PAYMENT_PROVIDER)
-            amount = self._payment_amount_cents()
-
-            def work():
-                return client.create_order(install_id, provider, amount)
-
-            def done(order, err):
-                if err:
-                    set_status(f"生成失败：{getattr(err, 'message', err)}", DOT_ERR)
-                    return
-                current_order["order"] = order
-                show_qr(order)
-                set_status(f"已生成 {PAYMENT_PROVIDER_LABELS.get(provider, provider)} 测试二维码", DOT_OK)
-
-            run_async(work, done)
-
-        def on_mock_pay():
-            order = current_order.get("order")
-            if not order:
-                self._show_warning("请先生成测试二维码")
-                return
-            if order.get("provider") != "mock":
-                self._show_warning("只有 Mock 渠道支持本机模拟支付")
-                return
-            set_status("正在模拟支付成功…")
-            client = self._payment_client()
-
-            def work():
-                paid = client.mock_pay(order["order_id"], self._payment_amount_cents())
-                entitlement = client.get_entitlement(self._payment_install_id())
-                return paid, entitlement
-
-            def done(result, err):
-                if err:
-                    set_status(f"模拟支付失败：{getattr(err, 'message', err)}", DOT_ERR)
-                    return
-                paid, entitlement = result
-                self._save_payment_entitlement(entitlement)
-                set_status(
-                    f"支付状态：{paid.get('tier')} · {payment_status_text(entitlement)}",
-                    DOT_OK if paid.get("tier") == "supporter" else TEXT_WEAK,
-                )
-
-            run_async(work, done)
-
-        actions = ctk.CTkFrame(body, fg_color="transparent")
-        actions.pack(fill="x", padx=20, pady=(0, 10))
-        actions.grid_columnconfigure((0, 1, 2), weight=1)
-        ctk.CTkButton(
-            actions, text="测试连接", height=32, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color=BORDER_WEAK,
-            text_color=TEXT_MAIN, hover_color=HOVER_BG,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            command=on_test_connection,
-        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
-        ctk.CTkButton(
-            actions, text="生成二维码", height=32, corner_radius=8,
-            fg_color="transparent", border_width=1, border_color=BORDER_WEAK,
-            text_color=TEXT_MAIN, hover_color=HOVER_BG,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            command=on_generate_qr,
-        ).grid(row=0, column=1, padx=4, sticky="ew")
-        ctk.CTkButton(
-            actions, text="模拟支付", height=32, corner_radius=8,
-            fg_color=PRIMARY, hover_color=PRIMARY_H,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            command=on_mock_pay,
-        ).grid(row=0, column=2, padx=(4, 0), sticky="ew")
-
-        footer = ctk.CTkFrame(body, fg_color="transparent")
-        footer.pack(fill="x", padx=20, pady=(0, 16))
-        ctk.CTkButton(
-            footer, text="保存并关闭", height=34, corner_radius=8,
-            fg_color=PRIMARY, hover_color=PRIMARY_H,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            command=lambda: on_close() if save_settings() else None,
-        ).pack(fill="x")
+            save_config(updates)
+        except Exception:
+            return False
+        return True
 
     def _show_donation_panel(self):
-        """支持作者面板：动态订单二维码 + 服务端权益状态。"""
+        """支持作者面板：低频入口 + 微信收款码，保持主流程干净。"""
         self.root.attributes("-topmost", False)
         win = ctk.CTkToplevel(self.root)
         win.withdraw()
         win.title("支持作者")
         win.resizable(False, False)
-        self._center_on_root(win, 360, 620)
+        self._center_on_root(win, 360, 660)
         win.lift()
         win.focus_force()
         win.grab_set()
         win.attributes("-topmost", True)
-        current_order = {"order": None, "poll_after": None, "closed": False}
 
         def on_close():
-            current_order["closed"] = True
-            if current_order.get("poll_after"):
-                try:
-                    self.root.after_cancel(current_order["poll_after"])
-                except Exception:
-                    pass
             win.destroy()
             self.root.attributes("-topmost", True)
 
@@ -4172,189 +3788,65 @@ class WXSenderApp:
 
         ctk.CTkLabel(
             body,
-            text="如果秒回SideKick帮你省下了时间，可以扫码支持。支付状态由服务端核验。",
+            text="如果秒回SideKick帮你省下了时间，欢迎随手支持一下。",
             text_color=TEXT_SUB, wraplength=300, justify="center",
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
         ).pack(fill="x", padx=28, pady=(18, 10))
 
-        status_lbl = ctk.CTkLabel(
-            body,
-            text=payment_status_text(self._app_config.get(PAYMENT_ENTITLEMENT_CACHE_KEY)),
-            text_color=TEXT_WEAK, wraplength=300, justify="center",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-        )
-        status_lbl.pack(fill="x", padx=28, pady=(0, 10))
-
-        provider = self._app_config.get(PAYMENT_PROVIDER_KEY, DEFAULT_PAYMENT_PROVIDER)
-        amount_cents = self._payment_amount_cents()
         ctk.CTkLabel(
             body,
-            text=f"当前渠道：{PAYMENT_PROVIDER_LABELS.get(provider, provider)} · 金额：{amount_cents / 100:.2f} 元",
+            text=donation_status_text(self._app_config.get(DONATION_PROFILE_KEY)),
             text_color=TEXT_WEAK, wraplength=300, justify="center",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-        ).pack(fill="x", padx=24, pady=(0, 10))
+        ).pack(fill="x", padx=28, pady=(0, 10))
 
         card = ctk.CTkFrame(
             body, corner_radius=14, fg_color=SURFACE,
             border_width=1, border_color=BORDER,
         )
         card.pack(fill="x", padx=24, pady=(0, 14))
-        qr_lbl = ctk.CTkLabel(
-            card,
-            text="点击下方按钮生成动态支付二维码",
-            text_color=TEXT_WEAK,
-            wraplength=270,
-            justify="center",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-        )
-        qr_lbl.pack(padx=14, pady=18)
+
+        qr_path = app_resource_path(DONATION_QR_RELATIVE_PATH)
+        qr_image = make_contained_image(qr_path, size=(240, 328))
+        win._donation_qr_image = qr_image
+        if qr_image:
+            ctk.CTkLabel(card, text="", image=qr_image).pack(padx=14, pady=14)
+        else:
+            ctk.CTkLabel(
+                card, text="收款码加载失败", text_color=DOT_ERR,
+                font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            ).pack(padx=14, pady=80)
 
         ctk.CTkLabel(
             body,
-            text="Mock 模式可直接点击「模拟支付成功」完成本地联调；微信/支付宝需后端配置商户参数。",
+            text="微信扫一扫 · 个人收款码不会自动回传金额，扫码后请在下方登记档位。",
             text_color=TEXT_WEAK,
             wraplength=300,
             justify="center",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11),
         ).pack(fill="x", padx=24, pady=(0, 10))
 
-        def set_status(text: str, color=TEXT_WEAK):
-            status_lbl.configure(text=text, text_color=color)
-
-        def show_qr(order: dict):
-            qr_payload = order.get("qr_code", "")
-            qr_image = make_qr_image(qr_payload)
-            win._donation_qr_image = qr_image
-            if qr_image:
-                qr_lbl.configure(text="", image=qr_image)
-            else:
-                qr_lbl.configure(
-                    image=None,
-                    text=f"二维码内容：\n{qr_payload[:220]}",
-                    text_color=TEXT_MAIN,
-                )
-
-        def run_async(work, done):
-            def task():
-                try:
-                    result = work()
-                    err = None
-                except Exception as exc:
-                    result = None
-                    err = exc
-                self.root.after(0, lambda: done(result, err))
-
-            threading.Thread(target=task, daemon=True).start()
-
-        def refresh_entitlement():
-            client = self._payment_client()
-            install_id = self._payment_install_id()
-            run_async(
-                lambda: client.get_entitlement(install_id),
-                lambda entitlement, err: (
-                    set_status(f"权益刷新失败：{getattr(err, 'message', err)}", DOT_ERR)
-                    if err else
-                    set_status(payment_status_text(self._save_payment_entitlement(entitlement)), DOT_OK if entitlement.get("tier") == "supporter" else TEXT_WEAK)
-                ),
-            )
-
-        def poll_order():
-            if current_order["closed"] or not current_order.get("order"):
+        def record_and_close(tier: str):
+            if not self._save_donation_support(tier):
+                self._show_warning("支持状态保存失败，请稍后再试")
                 return
-            client = self._payment_client()
-            current = current_order["order"]
-            order_id = current["order_id"]
-
-            def done(order, err):
-                if current_order["closed"]:
-                    return
-                if err:
-                    set_status(f"订单查询失败：{getattr(err, 'message', err)}", DOT_ERR)
-                    return
-                status = order.get("status")
-                if status == "paid":
-                    cache = self._save_payment_entitlement(order)
-                    set_status(payment_status_text(cache), DOT_OK if order.get("tier") == "supporter" else TEXT_WEAK)
-                    self._show_toast("支付状态已核验")
-                    return
-                if status in {"expired", "failed"}:
-                    set_status("二维码已失效，请重新生成", DOT_ERR)
-                    return
-                if status == "pending" and current.get("provider") != "mock":
-                    def sync_done(synced_order, sync_err):
-                        if current_order["closed"]:
-                            return
-                        if not sync_err and synced_order.get("status") == "paid":
-                            cache = self._save_payment_entitlement(synced_order)
-                            set_status(payment_status_text(cache), DOT_OK if synced_order.get("tier") == "supporter" else TEXT_WEAK)
-                            self._show_toast("支付状态已查单核验")
-                            return
-                        current_order["poll_after"] = self.root.after(2000, poll_order)
-
-                    run_async(lambda: client.sync_order(order_id), sync_done)
-                    return
-                set_status("等待支付中…")
-                current_order["poll_after"] = self.root.after(2000, poll_order)
-
-            run_async(lambda: client.get_order(order_id), done)
-
-        def generate_order():
-            set_status("正在生成支付二维码…")
-            client = self._payment_client()
-            install_id = self._payment_install_id()
-            provider_value = self._app_config.get(PAYMENT_PROVIDER_KEY, DEFAULT_PAYMENT_PROVIDER)
-            amount = self._payment_amount_cents()
-
-            def done(order, err):
-                if err:
-                    set_status(f"生成失败：{getattr(err, 'message', err)}", DOT_ERR)
-                    return
-                current_order["order"] = order
-                show_qr(order)
-                set_status("二维码已生成，等待支付…", TEXT_WEAK)
-                poll_order()
-
-            run_async(lambda: client.create_order(install_id, provider_value, amount), done)
-
-        def mock_pay_current_order():
-            order = current_order.get("order")
-            if not order:
-                self._show_warning("请先生成支付二维码")
-                return
-            if order.get("provider") != "mock":
-                self._show_warning("只有 Mock 渠道支持本机模拟支付")
-                return
-            set_status("正在模拟支付成功…")
-            client = self._payment_client()
-
-            def done(order, err):
-                if err:
-                    set_status(f"模拟支付失败：{getattr(err, 'message', err)}", DOT_ERR)
-                    return
-                cache = self._save_payment_entitlement(order)
-                set_status(payment_status_text(cache), DOT_OK if order.get("tier") == "supporter" else TEXT_WEAK)
-                self._show_toast("Mock 支付已核验")
-
-            run_async(lambda: client.mock_pay(order["order_id"], self._payment_amount_cents()), done)
-
-        actions = ctk.CTkFrame(body, fg_color="transparent")
-        actions.pack(fill="x", padx=24, pady=(0, 8))
-        actions.grid_columnconfigure((0, 1), weight=1)
+            on_close()
+            self._show_toast("已记录支持状态，每月提醒一次")
 
         ctk.CTkButton(
-            actions, text="生成支付二维码", height=34, corner_radius=8,
-            fg_color=PRIMARY, hover_color=PRIMARY_H,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            command=generate_order,
-        ).grid(row=0, column=0, padx=(0, 4), sticky="ew")
-
-        ctk.CTkButton(
-            actions, text="模拟支付成功", height=34, corner_radius=8,
+            body, text="我已支持（10元以下）", height=32, corner_radius=8,
             fg_color="transparent", border_width=1, border_color=BORDER_WEAK,
             text_color=TEXT_MAIN, hover_color=HOVER_BG,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
-            command=mock_pay_current_order,
-        ).grid(row=0, column=1, padx=(4, 0), sticky="ew")
+            command=lambda: record_and_close(DONATION_TIER_UNDER_10),
+        ).pack(fill="x", padx=24, pady=(0, 8))
+
+        ctk.CTkButton(
+            body, text="我已支持（10元及以上）", height=34, corner_radius=8,
+            fg_color=PRIMARY, hover_color=PRIMARY_H,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            command=lambda: record_and_close(DONATION_TIER_AT_LEAST_10),
+        ).pack(fill="x", padx=24, pady=(0, 8))
 
         ctk.CTkButton(
             body, text="完成", height=34, corner_radius=8,
@@ -4363,8 +3855,6 @@ class WXSenderApp:
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
             command=on_close,
         ).pack(fill="x", padx=24, pady=(0, 16))
-
-        refresh_entitlement()
 
     # ── 稳健性自检 ───────────────────────────────────────────────
 
